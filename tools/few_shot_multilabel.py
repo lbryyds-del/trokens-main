@@ -115,15 +115,6 @@ def few_shot_aux_has_support_tokens(few_shot_aux):
     )
 
 
-def few_shot_aux_has_query_partial_logits(few_shot_aux):
-    """Return True when few_shot_aux carries query-side q2s logits."""
-    return (
-        isinstance(few_shot_aux, dict)
-        and "query_partial_q2s_logits" in few_shot_aux
-        and isinstance(few_shot_aux["query_partial_q2s_logits"], torch.Tensor)
-    )
-
-
 def get_text_align_loss(few_shot_aux, ref_tensor):
     """Return the text alignment loss scalar or a zero scalar on the right device."""
     if isinstance(few_shot_aux, dict) and "text_align_loss" in few_shot_aux:
