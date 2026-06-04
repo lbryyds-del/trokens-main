@@ -24,71 +24,6 @@ from .build import MODEL_REGISTRY
 
 # pylint: disable=unused-argument,redefined-builtin
 
-class LabelAwareCMWCostNet(nn.Module):
-    """Label-aware CMW-style private reliability estimator."""
-
-    def __init__(
-        self,
-        token_evidence_dim=6,
-        label_context_dim=7,
-        hidden_dim=128,
-        num_families=5,
-    ):
-        super().__init__()
-        self.num_families = int(num_families)
-        self.token_branch = nn.Sequential(
-            nn.Linear(token_evidence_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, self.num_families),
-        )
-        self.label_branch = nn.Sequential(
-            nn.Linear(label_context_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim, self.num_families),
-        )
-
-    def forward(
-        self,
-        token_evidence,
-        label_context,
-        point_mask,
-        min_reliability=0.02,
-    ):
-        """Return private reliability over the raw label axis."""
-        token_evidence = torch.nan_to_num(
-            token_evidence.float(),
-            nan=0.0,
-            posinf=1.0,
-            neginf=0.0,
-        ).clamp(0.0, 1.0)
-        label_context = torch.nan_to_num(
-            label_context.float(),
-            nan=0.0,
-            posinf=1.0,
-            neginf=0.0,
-        ).clamp(0.0, 1.0)
-        candidate_reliability = torch.sigmoid(self.token_branch(token_evidence))
-        family_prob = torch.softmax(self.label_branch(label_context), dim=-1)
-        reliability = (
-            candidate_reliability * family_prob[:, None, None, :]
-        ).sum(dim=-1)
-        min_reliability = max(float(min_reliability), 0.0)
-        reliability = torch.nan_to_num(
-            reliability,
-            nan=min_reliability,
-            posinf=1.0,
-            neginf=min_reliability,
-        ).clamp(min=min_reliability, max=1.0)
-        point_mask = point_mask.to(device=reliability.device).bool()
-        reliability = reliability * point_mask.unsqueeze(0).to(reliability.dtype)
-        return reliability, {
-            "candidate_reliability": candidate_reliability,
-            "family_prob": family_prob,
-        }
-
-
 @MODEL_REGISTRY.register()
 class Pointformer(nn.Module):
     """ Main model for point tracking based transformer model.
@@ -301,15 +236,6 @@ class Pointformer(nn.Module):
                 self.text_to_model_proj = nn.Linear(self.text_feature_dim, self.embed_dim)
             if self.use_pot_support_route or self.use_text_alignment:
                 self.atomic_label_names = self._load_atomic_label_names()
-
-        self.use_cmw_cost = self.use_pot_support_route
-        if self.use_cmw_cost:
-            self.cmw_cost_net = LabelAwareCMWCostNet(
-                token_evidence_dim=6,
-                label_context_dim=7,
-                hidden_dim=int(getattr(self.pot_route_cfg, "CMW_COST_HIDDEN_DIM", 128)),
-                num_families=int(getattr(self.pot_route_cfg, "CMW_COST_NUM_FAMILIES", 5)),
-            )
 
         # Initialize weights
         self.init_weights()
@@ -927,264 +853,6 @@ class Pointformer(nn.Module):
         }
         return sharedness, components
 
-    def _normalized_token_norm(self, tokens, point_mask):
-        """Return a [T,N] min-max normalized token norm map."""
-        point_mask = point_mask.bool()
-        if tokens is None:
-            return point_mask.new_zeros(point_mask.shape, dtype=torch.float32)
-        if tokens.shape[:2] != point_mask.shape:
-            return point_mask.new_zeros(point_mask.shape, dtype=torch.float32)
-
-        tokens = torch.nan_to_num(
-            tokens.float(),
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
-        if tokens.ndim == 2:
-            strength = tokens.abs()
-        else:
-            strength = torch.norm(tokens, dim=-1)
-        strength = torch.nan_to_num(
-            strength,
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
-        normalized = torch.zeros_like(strength)
-        if point_mask.any():
-            valid_strength = strength[point_mask]
-            value_range = valid_strength.max() - valid_strength.min()
-            if float(value_range.item()) > 1e-6:
-                normalized = (strength - valid_strength.min()) / value_range.clamp_min(1e-6)
-        normalized = torch.where(point_mask, normalized, torch.zeros_like(normalized))
-        return torch.nan_to_num(
-            normalized.clamp(0.0, 1.0),
-            nan=0.0,
-            posinf=1.0,
-            neginf=0.0,
-        )
-
-    def _build_cmw_token_evidence(
-        self,
-        sim,
-        sim01,
-        sharedness,
-        point_mask,
-        intra_tokens=None,
-        inter_tokens=None,
-        semantic_strength=None,
-    ):
-        """Build CMW token evidence over the raw label axis."""
-        route_cfg = self.pot_route_cfg
-        num_labels = sim.shape[0]
-        tau_margin = max(
-            float(getattr(route_cfg, "CMW_COST_MARGIN_TAU", 0.1)),
-            1e-6,
-        )
-        if num_labels > 1:
-            best_other_sim = []
-            for label_idx in range(num_labels):
-                other_indices = [
-                    other_idx
-                    for other_idx in range(num_labels)
-                    if other_idx != label_idx
-                ]
-                other_sim = sim.index_select(
-                    0,
-                    torch.as_tensor(
-                        other_indices,
-                        device=sim.device,
-                        dtype=torch.long,
-                    ),
-                ).amax(dim=0)
-                best_other_sim.append(other_sim.unsqueeze(0))
-            best_other_sim = torch.cat(best_other_sim, dim=0)
-            margin = sim - best_other_sim
-        else:
-            margin = sim
-
-        margin_score = torch.sigmoid(margin / tau_margin)
-        sharedness = torch.nan_to_num(
-            sharedness.to(device=sim.device).float(),
-            nan=0.0,
-            posinf=1.0,
-            neginf=0.0,
-        ).clamp(0.0, 1.0)
-        shared_map = sharedness.unsqueeze(0).expand_as(margin_score)
-        conflict_shared = torch.maximum(1.0 - margin_score, shared_map)
-
-        motion_strength = self._normalized_token_norm(intra_tokens, point_mask).to(
-            device=sim.device,
-        )
-        inter_strength = self._normalized_token_norm(inter_tokens, point_mask).to(
-            device=sim.device,
-        )
-        if semantic_strength is None or semantic_strength.shape != point_mask.shape:
-            semantic_strength = sim01.max(dim=0).values
-        semantic_strength = torch.nan_to_num(
-            semantic_strength.to(device=sim.device).float(),
-            nan=0.0,
-            posinf=1.0,
-            neginf=0.0,
-        ).clamp(0.0, 1.0)
-
-        point_mask = point_mask.to(device=sim.device).bool()
-        valid3 = point_mask.unsqueeze(0).expand_as(sim01)
-        text_sim = torch.where(valid3, sim01, torch.zeros_like(sim01))
-        margin_score = torch.where(valid3, margin_score, torch.zeros_like(margin_score))
-        conflict_shared = torch.where(
-            valid3,
-            conflict_shared,
-            torch.zeros_like(conflict_shared),
-        )
-        motion_map = motion_strength.unsqueeze(0).expand_as(text_sim)
-        inter_map = inter_strength.unsqueeze(0).expand_as(text_sim)
-        semantic_map = semantic_strength.unsqueeze(0).expand_as(text_sim)
-
-        token_evidence = torch.stack(
-            [
-                text_sim,
-                margin_score,
-                conflict_shared,
-                motion_map,
-                inter_map,
-                semantic_map,
-            ],
-            dim=-1,
-        )
-        token_evidence = torch.nan_to_num(
-            token_evidence.float(),
-            nan=0.0,
-            posinf=1.0,
-            neginf=0.0,
-        ).clamp(0.0, 1.0)
-        components = {
-            "text_sim": text_sim,
-            "margin_score": margin_score,
-            "conflict_shared": conflict_shared,
-            "motion_strength": motion_strength,
-            "inter_strength": inter_strength,
-            "semantic_strength": semantic_strength,
-        }
-        return token_evidence, components
-
-    def _build_cmw_label_context(
-        self,
-        episode_positive_labels,
-        support_mask,
-        episode_label_text,
-        sample_positive_labels,
-        support_global,
-        positive_text,
-        raw_positive_labels=None,
-    ):
-        """Build [K,7] label context features for CMW private reliability."""
-        del episode_positive_labels, episode_label_text
-        device = positive_text.device
-        dtype = positive_text.dtype
-        num_labels = positive_text.shape[0]
-        if num_labels == 0:
-            return positive_text.new_zeros(0, 7)
-
-        support_count = positive_text.new_zeros(num_labels)
-        effective_support = positive_text.new_zeros(num_labels)
-        cooccur_degree = positive_text.new_zeros(num_labels)
-        num_support = 0
-        total_label_dim = max(num_labels, 1)
-        if raw_positive_labels is not None:
-            raw_positive_labels = raw_positive_labels.to(device=device).float()
-            if support_mask is None:
-                support_mask = torch.ones(
-                    raw_positive_labels.shape[0],
-                    device=device,
-                    dtype=torch.bool,
-                )
-            else:
-                support_mask = support_mask.to(device=device).bool()
-            support_labels = raw_positive_labels[support_mask]
-            num_support = int(support_mask.sum().item())
-            total_label_dim = max(int(raw_positive_labels.shape[-1]), 1)
-            if support_labels.numel() > 0:
-                sample_positive_labels = sample_positive_labels.to(
-                    device=device,
-                    dtype=torch.long,
-                ).flatten()
-                valid_label_ids = (
-                    (sample_positive_labels >= 0)
-                    & (sample_positive_labels < support_labels.shape[-1])
-                )
-                safe_label_ids = sample_positive_labels.clamp(
-                    min=0,
-                    max=max(int(support_labels.shape[-1]) - 1, 0),
-                )
-                support_subset = support_labels.index_select(1, safe_label_ids)
-                support_subset = support_subset * valid_label_ids.to(dtype).unsqueeze(0)
-                support_count = support_subset.sum(dim=0)
-
-                cardinality = support_labels.sum(dim=1).clamp_min(1.0)
-                effective_support = (
-                    support_subset / cardinality.unsqueeze(1)
-                ).sum(dim=0)
-                if num_labels > 1:
-                    label_cardinality = support_subset.sum(dim=1, keepdim=True)
-                    cooccur_count = (
-                        support_subset * (label_cardinality - support_subset)
-                    ).sum(dim=0)
-                    cooccur_degree = cooccur_count / (
-                        support_count.clamp_min(1.0) * float(num_labels - 1)
-                    )
-
-        support_denom = max(float(num_support), 1.0)
-        log_support = torch.log1p(support_count) / max(float(np.log1p(support_denom)), 1e-6)
-        normalized_support_count = support_count / support_denom
-        normalized_effective_support = effective_support / support_denom
-
-        text_norm = F.normalize(positive_text.float(), dim=-1)
-        if num_labels > 1:
-            text_sim = torch.matmul(text_norm, text_norm.transpose(0, 1)).clamp(-1.0, 1.0)
-            offdiag_mask = ~torch.eye(num_labels, device=device, dtype=torch.bool)
-            ambiguity = text_sim.masked_select(offdiag_mask).view(num_labels, num_labels - 1)
-            ambiguity = ambiguity.mean(dim=-1)
-            ambiguity = ((ambiguity + 1.0) * 0.5).clamp(0.0, 1.0)
-        else:
-            ambiguity = positive_text.new_zeros(num_labels)
-
-        support_global = F.normalize(
-            torch.nan_to_num(
-                support_global.to(device=device).float(),
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
-            ),
-            dim=-1,
-        )
-        global_text_sim = torch.matmul(text_norm, support_global).clamp(-1.0, 1.0)
-        global_text_sim = ((global_text_sim + 1.0) * 0.5).clamp(0.0, 1.0)
-        positive_label_count = positive_text.new_full(
-            (num_labels,),
-            min(float(num_labels) / max(float(total_label_dim), 1.0), 1.0),
-        )
-
-        label_context = torch.stack(
-            [
-                log_support,
-                normalized_support_count,
-                normalized_effective_support,
-                ambiguity,
-                cooccur_degree,
-                global_text_sim,
-                positive_label_count,
-            ],
-            dim=-1,
-        )
-        return torch.nan_to_num(
-            label_context.to(dtype=dtype).clamp(0.0, 1.0),
-            nan=0.0,
-            posinf=1.0,
-            neginf=0.0,
-        )
-
     def _solve_avg_3d_uot(
         self,
         cost,
@@ -1337,13 +1005,6 @@ class Pointformer(nn.Module):
         point_mask,
         support_global,
         positive_text,
-        intra_tokens=None,
-        inter_tokens=None,
-        episode_positive_labels=None,
-        support_mask=None,
-        sample_positive_labels=None,
-        episode_label_text=None,
-        raw_positive_labels=None,
         return_debug=False,
         target_label_indices=None,
     ):
@@ -1469,6 +1130,8 @@ class Pointformer(nn.Module):
         ).clamp(-1.0, 1.0)
 
         sim01 = ((sim + 1.0) * 0.5).clamp(0.0, 1.0)
+        cost = 1.0 - sim01
+        cost = cost.masked_fill(~point_mask.unsqueeze(0), 1e4)
 
         shared_enabled = bool(getattr(route_cfg, "UOT3D_SHARED_ENABLE", False))
         sharedness = st_tokens.new_zeros(temporal_dim, num_points)
@@ -1483,85 +1146,15 @@ class Pointformer(nn.Module):
                 return_components=True,
             )
 
-        if not hasattr(self, "cmw_cost_net"):
-            raise RuntimeError(
-                "LabelAwareCMWCostNet is required for POT support routing."
-            )
-
-        semantic_for_cmw = (
-            shared_components["semantic_strength"]
-            if shared_enabled and num_labels > 1
-            else None
-        )
-        cmw_token_evidence, cmw_evidence_components = self._build_cmw_token_evidence(
-            sim,
-            sim01,
-            sharedness,
-            point_mask,
-            intra_tokens=intra_tokens,
-            inter_tokens=inter_tokens,
-            semantic_strength=semantic_for_cmw,
-        )
-        if sample_positive_labels is None:
-            sample_positive_labels = torch.arange(
-                num_labels,
-                device=st_tokens.device,
-                dtype=torch.long,
-            )
-        cmw_label_context = self._build_cmw_label_context(
-            episode_positive_labels,
-            support_mask,
-            episode_label_text,
-            sample_positive_labels,
-            support_global,
-            positive_text,
-            raw_positive_labels=raw_positive_labels,
-        )
-        cmw_min_reliability = float(getattr(
-            route_cfg,
-            "CMW_COST_MIN_RELIABILITY",
-            0.02,
-        ))
-        cmw_private_reliability, cmw_aux = self.cmw_cost_net(
-            cmw_token_evidence,
-            cmw_label_context,
-            point_mask,
-            min_reliability=cmw_min_reliability,
-        )
-        cmw_private_reliability = torch.nan_to_num(
-            cmw_private_reliability.to(device=sim.device).float(),
-            nan=cmw_min_reliability,
-            posinf=1.0,
-            neginf=cmw_min_reliability,
-        ).clamp(min=max(cmw_min_reliability, 0.0), max=1.0)
-        cmw_private_reliability = (
-            cmw_private_reliability
-            * point_mask.unsqueeze(0).to(cmw_private_reliability.dtype)
-        )
-        private_cost = 1.0 - cmw_private_reliability
-        private_cost = torch.nan_to_num(
-            private_cost,
-            nan=1.0,
-            posinf=1.0,
-            neginf=0.0,
-        )
-        private_cost = private_cost.masked_fill(~point_mask.unsqueeze(0), 1e4)
-        cost = private_cost
-        cost_source = "cmw_private_cost"
-
-        shared_cost = torch.nan_to_num(
-            1.0 - sharedness,
-            nan=1.0,
-            posinf=1.0,
-            neginf=0.0,
-        )
+        lambda_shared = float(getattr(route_cfg, "UOT3D_SHARED_COST_WEIGHT", 0.5))
+        private_cost = 1.0 - sim01 + lambda_shared * sharedness.unsqueeze(0)
+        shared_cost = 1.0 - sharedness
         cost_ext = torch.cat(
             [private_cost, shared_cost.unsqueeze(0)],
             dim=0,
         )
         cost_ext = cost_ext.masked_fill(~point_mask.unsqueeze(0), 1e4)
         cost_ext = torch.nan_to_num(cost_ext, nan=1e4, posinf=1e4, neginf=0.0)
-        cost = torch.nan_to_num(cost, nan=1e4, posinf=1e4, neginf=0.0)
 
         base_mu_logit_scale = float(getattr(route_cfg, "MU_LOGIT_SCALE", 10.0))
         mu_logit_scale = max(
@@ -1865,21 +1458,6 @@ class Pointformer(nn.Module):
                         debug_topk,
                     ),
                 }
-                family_prob = cmw_aux.get("family_prob")
-                if family_prob is not None:
-                    target_debug_item.update({
-                        "cmw_target_reliability_summary": (
-                            self._pot_debug_masked_summary(
-                                cmw_private_reliability[target_idx],
-                                point_mask,
-                            )
-                        ),
-                        "cmw_target_family_prob": (
-                            self._pot_debug_list(family_prob[target_idx])
-                            if family_prob is not None
-                            else []
-                        ),
-                    })
                 if use_shared_transport:
                     target_debug_item.update({
                         "shared_frame_l1_to_prior": self._pot_debug_scalar(
@@ -1930,8 +1508,6 @@ class Pointformer(nn.Module):
             "sim": sim,
             "cost": cost,
             "cost_ext": cost_ext,
-            "private_cost": private_cost,
-            "shared_cost": shared_cost,
             "sharedness": sharedness,
             "label_entropy": shared_components["label_entropy"],
             "semantic_strength": shared_components["semantic_strength"],
@@ -1943,8 +1519,6 @@ class Pointformer(nn.Module):
             "shared_transport_mass": shared_transport_mass,
             "target_label_indices": target_label_indices,
         }
-        result["cmw_private_reliability"] = cmw_private_reliability
-        result["cmw_family_prob"] = cmw_aux.get("family_prob")
         if return_debug:
             valid_cost_mask = point_mask.unsqueeze(0).expand_as(private_cost)
             shared_cost_mask = point_mask
@@ -1976,14 +1550,13 @@ class Pointformer(nn.Module):
                     "shared_enable": bool(shared_enabled),
                     "shared_effective": bool(use_shared_transport),
                     "shared_ratio": round(float(shared_ratio), 6),
+                    "shared_cost_weight": round(float(lambda_shared), 6),
                     "vis_private_weight": round(float(alpha_private_vis), 6),
                     "vis_shared_weight": round(float(alpha_shared_vis), 6),
                     "shared_tau_label": round(float(getattr(route_cfg, "SHARED_TAU_LABEL", 0.07)), 6),
                     "shared_theta": round(float(getattr(route_cfg, "SHARED_THETA", 0.2)), 6),
                     "shared_tau_strength": round(float(getattr(route_cfg, "SHARED_TAU_STRENGTH", 0.1)), 6),
-                    "private_cost_source": "cmw",
                 },
-                "cost_source": cost_source,
                 "target_label_indices": [
                     int(target_idx)
                     for target_idx in target_label_indices.detach().cpu().tolist()
@@ -2049,32 +1622,6 @@ class Pointformer(nn.Module):
                 ),
                 "targets": target_debug,
             }
-            cmw_valid_mask = point_mask.unsqueeze(0).expand_as(
-                cmw_private_reliability
-            )
-            cmw_family_prob = cmw_aux.get("family_prob")
-            result["debug"].update({
-                "cmw_private_reliability_summary": self._pot_debug_masked_summary(
-                    cmw_private_reliability,
-                    cmw_valid_mask,
-                ),
-                "cmw_family_prob": (
-                    [
-                        self._pot_debug_list(cmw_family_prob[label_idx])
-                        for label_idx in range(cmw_family_prob.shape[0])
-                    ]
-                    if cmw_family_prob is not None
-                    else []
-                ),
-                "cmw_evidence_mean": {
-                    name: self._pot_debug_scalar(value[point_mask].mean())
-                    if value.ndim == 2
-                    else self._pot_debug_scalar(
-                        value[point_mask.unsqueeze(0).expand_as(value)].mean()
-                    )
-                    for name, value in cmw_evidence_components.items()
-                },
-            })
         return result
 
     def _solve_joint_relaxed_transport(
@@ -2166,16 +1713,16 @@ class Pointformer(nn.Module):
 
         return torch.nan_to_num(transport, nan=0.0, posinf=0.0, neginf=0.0)
 
-    def _compute_joint_positive_traj_transport(
+    def _compute_joint_positive_st_transport(
         self,
-        st_tokens,
-        point_mask,
+        token_repr,
+        valid_mask,
         support_global,
         positive_text,
     ):
-        """Solve positive-label POT over full trajectories, then refine over time."""
+        """Old joint positive-label POT, applied to flattened space-time tokens."""
         route_cfg = self.pot_route_cfg
-        st_tokens = torch.nan_to_num(st_tokens, nan=0.0, posinf=0.0, neginf=0.0)
+        token_repr = torch.nan_to_num(token_repr, nan=0.0, posinf=0.0, neginf=0.0)
         support_global = torch.nan_to_num(
             support_global,
             nan=0.0,
@@ -2188,80 +1735,26 @@ class Pointformer(nn.Module):
             posinf=0.0,
             neginf=0.0,
         )
-        if point_mask is None:
-            point_mask = torch.ones(
-                st_tokens.shape[:2],
-                device=st_tokens.device,
-                dtype=torch.bool,
-            )
-        else:
-            point_mask = point_mask.to(device=st_tokens.device).bool()
+        valid_mask = valid_mask.to(device=token_repr.device).bool()
         num_labels = positive_text.shape[0]
-        temporal_dim, num_points = st_tokens.shape[:2]
-        valid_traj_mask = point_mask.any(dim=0) if num_points > 0 else point_mask.new_zeros(0)
-        if (
-            num_labels == 0
-            or temporal_dim == 0
-            or num_points == 0
-            or not valid_traj_mask.any()
-        ):
-            traj_empty = st_tokens.new_zeros(num_labels, num_points)
-            st_empty = st_tokens.new_zeros(num_labels, temporal_dim, num_points)
-            return {
-                "transport": traj_empty,
-                "temporal_weights": st_empty,
-                "st_transport": st_empty,
-                "affinity": traj_empty,
-                "traj_sim": traj_empty,
-            }
+        num_tokens = token_repr.shape[0]
+        if num_labels == 0 or num_tokens == 0 or not valid_mask.any():
+            empty = token_repr.new_zeros(num_labels, num_tokens)
+            return {"transport": empty, "affinity": empty}
 
-        st_tokens = F.normalize(st_tokens.float(), dim=-1)
+        token_repr = F.normalize(token_repr.float(), dim=-1)
         support_global = F.normalize(support_global.float(), dim=-1)
         positive_text = F.normalize(positive_text.float(), dim=-1)
 
-        sim = torch.einsum("ld,tnd->ltn", positive_text, st_tokens)
-        sim = torch.nan_to_num(
-            sim,
+        sim_matrix = torch.matmul(positive_text, token_repr.transpose(0, 1))
+        sim_matrix = torch.nan_to_num(
+            sim_matrix,
             nan=0.0,
             posinf=1.0,
             neginf=-1.0,
         ).clamp(-1.0, 1.0)
-
-        valid_time_mask = point_mask.unsqueeze(0)
-        masked_sim = sim.masked_fill(~valid_time_mask, -1e4)
-        temporal_tau = max(
-            float(getattr(route_cfg, "TEMPORAL_TAU", route_cfg.AFFINITY_TAU)),
-            1e-6,
-        )
-        temporal_weights = torch.softmax(masked_sim / temporal_tau, dim=1)
-        temporal_weights = temporal_weights * valid_time_mask.to(temporal_weights.dtype)
-        temporal_weights = temporal_weights / temporal_weights.sum(
-            dim=1,
-            keepdim=True,
-        ).clamp_min(1e-12)
-        temporal_weights = torch.where(
-            valid_traj_mask.view(1, 1, num_points),
-            temporal_weights,
-            torch.zeros_like(temporal_weights),
-        )
-        temporal_weights = torch.nan_to_num(
-            temporal_weights,
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
-
-        traj_sim = (temporal_weights * sim).sum(dim=1)
-        traj_sim = torch.nan_to_num(
-            traj_sim,
-            nan=0.0,
-            posinf=1.0,
-            neginf=-1.0,
-        ).clamp(-1.0, 1.0)
-        traj_sim = traj_sim.masked_fill(~valid_traj_mask.unsqueeze(0), -1e4)
-
-        cost = 1.0 - traj_sim
-        cost = cost.masked_fill(~valid_traj_mask.unsqueeze(0), 1e4)
+        cost = 1.0 - sim_matrix
+        cost = cost.masked_fill(~valid_mask.unsqueeze(0), 1e4)
 
         mu_logits = max(float(route_cfg.MU_LOGIT_SCALE), 1e-6) * torch.matmul(
             positive_text,
@@ -2270,28 +1763,23 @@ class Pointformer(nn.Module):
         mu = torch.softmax(mu_logits, dim=0)
 
         affinity_tau = max(float(route_cfg.AFFINITY_TAU), 1e-6)
-        affinity = torch.softmax(traj_sim / affinity_tau, dim=-1)
-        affinity = affinity * valid_traj_mask.unsqueeze(0).to(affinity.dtype)
+        masked_sim = sim_matrix.masked_fill(~valid_mask.unsqueeze(0), -1e4)
+        affinity = torch.softmax(masked_sim / affinity_tau, dim=-1)
+        affinity = affinity * valid_mask.unsqueeze(0).to(affinity.dtype)
         affinity = affinity / affinity.sum(dim=-1, keepdim=True).clamp_min(1e-12)
-        affinity = torch.nan_to_num(
-            affinity,
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
 
         entropy = self._normalized_distribution_entropy(
             affinity,
-            valid_count=int(valid_traj_mask.sum().item()),
+            valid_count=int(valid_mask.sum().item()),
         )
         rho_min = min(max(float(route_cfg.RHO_MIN), 0.0), 1.0)
         rho_max = min(max(float(route_cfg.RHO_MAX), rho_min), 1.0)
         rho = rho_min + (rho_max - rho_min) * entropy
         row_mass = mu * rho
 
-        nu_shared = affinity.mean(dim=0) * valid_traj_mask.to(affinity.dtype)
+        nu_shared = affinity.mean(dim=0) * valid_mask.to(affinity.dtype)
         if float(nu_shared.sum().item()) <= 0.0:
-            nu_shared = valid_traj_mask.to(affinity.dtype)
+            nu_shared = valid_mask.to(affinity.dtype)
         nu_shared = nu_shared / nu_shared.sum().clamp_min(1e-6)
         kappa = max(float(route_cfg.KAPPA), 1.0)
         col_cap = kappa * nu_shared
@@ -2302,20 +1790,9 @@ class Pointformer(nn.Module):
             col_cap,
             force_total_mass=True,
         )
-        st_transport = transport[:, None, :] * temporal_weights
-        st_transport = st_transport * valid_time_mask.to(st_transport.dtype)
-        st_transport = torch.nan_to_num(
-            st_transport,
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
         return {
             "transport": transport,
-            "temporal_weights": temporal_weights,
-            "st_transport": st_transport,
             "affinity": affinity,
-            "traj_sim": traj_sim,
         }
 
     def _build_support_text_alignment(self, patch_tokens, metadata):
@@ -2784,6 +2261,10 @@ class Pointformer(nn.Module):
             debug_path = Path(debug_file)
         else:
             debug_path = Path(str(self.cfg.OUTPUT_DIR)) / debug_file
+        test_log_file = str(getattr(self.cfg, "test_log_file", ""))
+        if not self.training and test_log_file:
+            suffix = debug_path.suffix or ".jsonl"
+            debug_path = debug_path.with_name(f"{debug_path.stem}_test{suffix}")
         debug_path.parent.mkdir(parents=True, exist_ok=True)
 
         record = dict(record)
@@ -3436,7 +2917,7 @@ class Pointformer(nn.Module):
         metadata,
     ):
         """Build support prototypes with target-conditioned 3D-UOT routing."""
-        del app_tokens
+        del app_tokens, intra_tokens, inter_tokens
         support_mask = metadata['support_mask'].bool()
         episode_positive_labels = metadata['episode_positive_labels'].to(
             device=value_tokens.device,
@@ -3592,16 +3073,6 @@ class Pointformer(nn.Module):
                 0,
                 text_indices,
             )
-            sample_intra_tokens = (
-                intra_tokens[sample_idx]
-                if torch.is_tensor(intra_tokens)
-                else None
-            )
-            sample_inter_tokens = (
-                inter_tokens[sample_idx]
-                if torch.is_tensor(inter_tokens)
-                else None
-            )
             debug_this_sample = (
                 log_pot_debug
                 and debug_records_this_call < debug_max_samples
@@ -3611,13 +3082,6 @@ class Pointformer(nn.Module):
                 sample_point_mask,
                 support_global,
                 positive_text,
-                intra_tokens=sample_intra_tokens,
-                inter_tokens=sample_inter_tokens,
-                episode_positive_labels=episode_positive_labels,
-                support_mask=support_mask,
-                sample_positive_labels=label_axis_global_labels,
-                episode_label_text=label_text_features,
-                raw_positive_labels=raw_positive_labels,
                 return_debug=debug_this_sample,
                 target_label_indices=label_axis_proto_indices,
             )

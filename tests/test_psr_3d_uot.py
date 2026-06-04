@@ -6,38 +6,6 @@ import torch
 from trokens.models.pointformer import Pointformer
 
 
-class _ConstantCMWCostNet:
-    def __init__(self, reliability=0.37, num_families=5):
-        self.reliability = float(reliability)
-        self.num_families = int(num_families)
-
-    def __call__(
-        self,
-        token_evidence,
-        label_context,
-        point_mask,
-        min_reliability=0.02,
-    ):
-        del label_context
-        reliability = token_evidence.new_full(
-            token_evidence.shape[:3],
-            max(self.reliability, float(min_reliability)),
-        )
-        reliability = reliability * point_mask.unsqueeze(0).to(reliability.dtype)
-        family_prob = token_evidence.new_full(
-            (token_evidence.shape[0], self.num_families),
-            1.0 / float(self.num_families),
-        )
-        candidate_reliability = reliability.unsqueeze(-1).expand(
-            *reliability.shape,
-            self.num_families,
-        )
-        return reliability, {
-            "candidate_reliability": candidate_reliability,
-            "family_prob": family_prob,
-        }
-
-
 def _model_with_psr_cfg():
     model = Pointformer.__new__(Pointformer)
     model.pot_route_cfg = SimpleNamespace(
@@ -59,17 +27,13 @@ def _model_with_psr_cfg():
         SHARED_THETA=0.2,
         SHARED_TAU_STRENGTH=0.1,
         UOT3D_SHARED_ENABLE=True,
+        UOT3D_SHARED_COST_WEIGHT=0.5,
         UOT3D_SHARED_RATIO=0.2,
         UOT3D_VIS_PRIVATE_WEIGHT=1.0,
         UOT3D_VIS_SHARED_WEIGHT=1.0,
-        CMW_COST_NUM_FAMILIES=5,
-        CMW_COST_HIDDEN_DIM=128,
-        CMW_COST_MIN_RELIABILITY=0.02,
-        CMW_COST_MARGIN_TAU=0.1,
         DEBUG_TOPK=3,
         DEBUG_SAVE_TOP_TOKENS=True,
     )
-    model.cmw_cost_net = _ConstantCMWCostNet(reliability=0.37, num_families=5)
     return model
 
 
@@ -156,131 +120,3 @@ def test_psr_3d_uot_transport_shapes_and_debug_are_stable():
     assert "target_vs_shared_overlap" in debug["targets"][0]
     assert "shared_absorption_ratio" in debug["targets"][0]
     json.dumps(debug)
-
-
-def test_cmw_replaces_only_private_cost_rows():
-    model = _model_with_psr_cfg()
-    model.cmw_cost_net = _ConstantCMWCostNet(reliability=0.37, num_families=5)
-
-    positive_text = torch.eye(4, dtype=torch.float32)[:3]
-    st_tokens = torch.tensor(
-        [
-            [
-                [1.0, 0.0, 0.0, 0.0],
-                [1.0, 1.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-                [0.0, 1.0, 0.0, 0.0],
-            ],
-            [
-                [0.9, 0.1, 0.0, 0.0],
-                [0.8, 0.8, 0.8, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-                [0.0, 0.9, 0.1, 0.0],
-            ],
-        ],
-        dtype=torch.float32,
-    )
-    point_mask = torch.tensor(
-        [
-            [True, True, True, True],
-            [True, True, False, True],
-        ]
-    )
-    support_global = st_tokens[point_mask].mean(dim=0)
-
-    out = model._compute_avg_3d_uot_transport(
-        st_tokens,
-        point_mask,
-        support_global,
-        positive_text,
-        return_debug=True,
-        target_label_indices=torch.tensor([0, 2]),
-    )
-
-    valid_private = point_mask.unsqueeze(0).expand(3, 2, 4)
-    expected_private_cost = torch.full_like(out["private_cost"], 0.63)
-    assert torch.allclose(
-        out["private_cost"][valid_private],
-        expected_private_cost[valid_private],
-        atol=1e-6,
-    )
-    assert torch.allclose(
-        out["cost"][valid_private],
-        expected_private_cost[valid_private],
-        atol=1e-6,
-    )
-    assert out["private_cost"][:, 1, 2].min() == 1e4
-    assert out["cost_ext"][:3, 1, 2].min() == 1e4
-    assert torch.allclose(
-        out["cost_ext"][-1][point_mask],
-        1.0 - out["sharedness"][point_mask],
-        atol=1e-6,
-    )
-    assert out["st_transport"].shape == (2, 2, 4)
-    assert out["target_label_indices"].tolist() == [0, 2]
-
-    debug = out["debug"]
-    assert debug["cost_source"] == "cmw_private_cost"
-    assert "cmw_private_reliability_summary" in debug
-    assert "cmw_evidence_mean" in debug
-    assert "cmw_target_reliability_summary" in debug["targets"][0]
-    assert "cmw_target_top_reliable_tokens" not in debug["targets"][0]
-    json.dumps(debug)
-
-
-def test_cmw_raw_label_axis_keeps_target_subset_outputs():
-    model = _model_with_psr_cfg()
-    model.cfg = SimpleNamespace(POINT_INFO=SimpleNamespace(USE_PT_QUERY_MASK=False))
-    model.num_classes = 5
-    model.atomic_label_names = [str(class_id) for class_id in range(5)]
-    model._should_log_pot_debug = lambda: False
-    model._get_pot_label_text_features = lambda ids, dtype: torch.nn.functional.one_hot(
-        ids.cpu(),
-        num_classes=5,
-    ).to(dtype=dtype)
-
-    calls = []
-
-    def fake_uot(
-        st_tokens,
-        point_mask,
-        support_global,
-        positive_text,
-        **kwargs,
-    ):
-        del support_global
-        calls.append((positive_text.clone(), kwargs["target_label_indices"].clone()))
-        num_targets = int(kwargs["target_label_indices"].numel())
-        return {
-            "st_transport": torch.ones(num_targets, *point_mask.shape),
-            "sim": torch.zeros(positive_text.shape[0], *point_mask.shape),
-        }
-
-    model._compute_avg_3d_uot_transport = fake_uot
-    value_tokens = torch.randn(2, 2, 3, 5)
-    metadata = {
-        "support_mask": torch.tensor([True, False]),
-        "episode_positive_labels": torch.tensor(
-            [[1, 0, 1], [0, 0, 0]],
-            dtype=torch.float32,
-        ),
-        "raw_positive_labels": torch.tensor(
-            [[1, 1, 0, 1, 0], [0, 0, 0, 0, 0]],
-            dtype=torch.float32,
-        ),
-        "episode_class_ids": torch.tensor([0, 2, 3]),
-        "pred_visibility": torch.ones(2, 2, 3, dtype=torch.bool),
-    }
-
-    aux = model._build_pot_support_prototypes(
-        None,
-        None,
-        None,
-        value_tokens,
-        metadata,
-    )
-    positive_text, target_label_indices = calls[0]
-    assert positive_text.shape[0] == 3
-    assert target_label_indices.detach().cpu().tolist() == [0, 2]
-    assert aux["support_branch_class_indices"].detach().cpu().tolist() == [0, 2]
-    assert aux["support_conditioned_patch_tokens"].shape[0] == 2
