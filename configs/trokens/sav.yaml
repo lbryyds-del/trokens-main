@@ -87,11 +87,10 @@ FEW_SHOT:
     LOCAL_NEGATIVE_TOPK: 2
     LOCAL_NEGATIVE_TEMPERATURE: 0.10
     LOCAL_DETACH_REFERENCES: True
-    # Raw text selects semantic trajectory slots only for evidence verification;
-    # the existing post-Pointformer Text+Support route still constructs Q.
+    # Frame specificity verifies the same class-conditioned post-Pointformer
+    # patch distribution pi that constructs Q_k. No second text-patch route is
+    # built for specificity.
     EVIDENCE_VERIFICATION_ENABLE: True
-    EVIDENCE_MAP_SOURCE: "raw"
-    EVIDENCE_MAP_TEMPERATURE: 0.07
     EVIDENCE_USE_VISIBILITY: True
     EVIDENCE_POSITIVE_AGGREGATION: "topk_mean"
     EVIDENCE_POSITIVE_TOPK: 2

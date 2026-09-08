@@ -2507,18 +2507,15 @@ class Pointformer(nn.Module):
             matchability_source = str(
                 getattr(match_cfg, "EVIDENCE_SOURCE", "post")
             ).lower()
-            evidence_verification_enabled = bool(
-                getattr(match_cfg, "EVIDENCE_VERIFICATION_ENABLE", False)
+            absolute_mass_enabled = bool(
+                getattr(match_cfg, "ABSOLUTE_MASS_ENABLE", False)
             )
-            evidence_map_source = str(
-                getattr(match_cfg, "EVIDENCE_MAP_SOURCE", "raw")
+            absolute_mass_source = str(
+                getattr(match_cfg, "ABSOLUTE_MASS_SOURCE", "raw")
             ).lower()
             raw_evidence_requested = (
                 matchability_source == "raw"
-                or (
-                    evidence_verification_enabled
-                    and evidence_map_source == "raw"
-                )
+                or (absolute_mass_enabled and absolute_mass_source == "raw")
             )
             if (
                 bool(getattr(match_cfg, "ENABLE", False))

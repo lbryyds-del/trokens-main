@@ -89,6 +89,46 @@ def masked_topk_mean(
     return torch.nan_to_num(result, nan=0.0, posinf=1.0, neginf=-1.0)
 
 
+def normalize_patch_region_weights(
+    region_weights: torch.Tensor,
+    point_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Apply a frame mask to class-conditioned ``[B,K,T,N]`` weights.
+
+    Query construction already produces the hypothesis distribution ``pi``.
+    Frame specificity reuses its relative patch weights, only removing patches
+    that are invalid for evidence verification and renormalizing the remainder.
+    """
+    if region_weights.ndim != 4:
+        raise ValueError(
+            "region_weights must have shape [B,K,T,N]; got "
+            f"{tuple(region_weights.shape)}."
+        )
+    batch, _, temporal_dim, num_points = region_weights.shape
+    if tuple(point_mask.shape) != (batch, temporal_dim, num_points):
+        raise ValueError(
+            "point_mask must match region_weights B,T,N; got "
+            f"{tuple(point_mask.shape)}, expected "
+            f"{(batch, temporal_dim, num_points)}."
+        )
+
+    valid = point_mask.to(device=region_weights.device).bool().unsqueeze(1)
+    weights = torch.nan_to_num(
+        region_weights.float(),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    ).clamp_min(0.0)
+    weights = weights * valid.to(dtype=weights.dtype)
+    denominator = weights.sum(dim=-1, keepdim=True)
+    normalized = weights / denominator.clamp_min(1e-12)
+    return torch.where(
+        denominator > 0.0,
+        normalized,
+        torch.zeros_like(normalized),
+    )
+
+
 def pairwise_bimhm(
     query_prototypes: torch.Tensor,
     support_prototypes: torch.Tensor,
@@ -762,88 +802,6 @@ def compute_local_positive_confuser_margin(
     )
 
 
-def build_query_evidence_map(
-    pointformer: Any,
-    evidence_tokens: torch.Tensor,
-    point_mask: torch.Tensor,
-    episode_label_text: torch.Tensor,
-    temperature: float = 0.02,
-) -> Dict[str, torch.Tensor]:
-    """Build a pure-text evidence map without changing Query construction.
-
-    ``evidence_tokens`` are normally raw DinoTxt samples before positional,
-    motion and Pointformer mixing.  Their ``[T,N]`` slots are aligned with the
-    post-Pointformer values, so the returned weights can select which post
-    responses should be compared while leaving the deployed Query prototype
-    route untouched.
-    """
-    if evidence_tokens.ndim != 4:
-        raise ValueError(
-            "evidence_tokens must have shape [Q,T,N,D]; got "
-            f"{tuple(evidence_tokens.shape)}."
-        )
-    q, temporal_dim, num_points, feat_dim = evidence_tokens.shape
-    if tuple(point_mask.shape) != (q, temporal_dim, num_points):
-        raise ValueError(
-            "point_mask must match evidence_tokens Q,T,N; got "
-            f"{tuple(point_mask.shape)}."
-        )
-    if (
-        episode_label_text.ndim != 2
-        or episode_label_text.shape[-1] != feat_dim
-    ):
-        raise ValueError(
-            "episode_label_text must have shape [K,D] matching evidence "
-            f"tokens; got {tuple(episode_label_text.shape)} and D={feat_dim}."
-        )
-    temperature = float(temperature)
-    if (
-        not bool(torch.isfinite(torch.tensor(temperature)))
-        or temperature <= 0.0
-    ):
-        raise ValueError("Evidence-map temperature must be finite and positive.")
-
-    token_unit = _safe_unit(evidence_tokens)
-    text_unit = _safe_unit(
-        episode_label_text.to(device=evidence_tokens.device)
-    )
-    similarity = torch.einsum("kd,qtnd->qktn", text_unit, token_unit)
-    similarity = torch.nan_to_num(
-        similarity,
-        nan=0.0,
-        posinf=1.0,
-        neginf=-1.0,
-    ).clamp(-1.0, 1.0)
-    valid = point_mask.to(device=evidence_tokens.device).bool().unsqueeze(1)
-    weights = pointformer._masked_softmax_1d(
-        similarity,
-        valid,
-        dim=-1,
-        tau=temperature,
-    ).float()
-    weights = torch.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0)
-    effective_patches = 1.0 / weights.square().sum(dim=-1).clamp_min(1e-12)
-    top1_mass = weights.max(dim=-1).values
-    frame_valid = point_mask.to(device=evidence_tokens.device).bool().any(dim=-1)
-    effective_patches = torch.where(
-        frame_valid.unsqueeze(1),
-        effective_patches,
-        torch.zeros_like(effective_patches),
-    )
-    top1_mass = torch.where(
-        frame_valid.unsqueeze(1),
-        top1_mass,
-        torch.zeros_like(top1_mass),
-    )
-    return {
-        "weights": weights,
-        "similarity": similarity,
-        "frame_valid": frame_valid,
-        "effective_patches": effective_patches,
-        "top1_mass": top1_mass,
-    }
-
-
 def compute_evidence_conditioned_frame_matchability(
     evidence_weights: torch.Tensor,
     positive_response: torch.Tensor,
@@ -854,7 +812,7 @@ def compute_evidence_conditioned_frame_matchability(
     temperature: float = 0.10,
     bias: float = 0.0,
 ) -> Dict[str, torch.Tensor]:
-    """Compare Positive and Confuser explanations on identical raw regions."""
+    """Compare Positive and Confuser explanations on one hypothesis region."""
     if evidence_weights.ndim != 4:
         raise ValueError(
             "evidence_weights must have shape [Q,K,T,N]; got "
@@ -1881,26 +1839,6 @@ def _build_frame_softmax_q2s_with_matchability(
     absolute_mass_enable = bool(
         _cfg_value(cfg, "ABSOLUTE_MASS_ENABLE", False)
     )
-    evidence_map_source = str(
-        _cfg_value(cfg, "EVIDENCE_MAP_SOURCE", "raw")
-    ).lower()
-    if evidence_verification_enable and evidence_map_source not in {
-        "raw",
-        "post",
-    }:
-        raise ValueError(
-            "EVIDENCE_MAP_SOURCE must be 'raw' or 'post'; got "
-            f"{evidence_map_source!r}."
-        )
-    if (
-        evidence_verification_enable
-        and evidence_map_source == "raw"
-        and matchability_evidence_tokens is None
-    ):
-        raise ValueError(
-            "Raw Evidence verification was enabled, but pre-Pointformer "
-            "DinoTxt tokens were not provided."
-        )
     absolute_mass_source = str(
         _cfg_value(cfg, "ABSOLUTE_MASS_SOURCE", "raw")
     ).lower()
@@ -2109,7 +2047,7 @@ def _build_frame_softmax_q2s_with_matchability(
         pre_refinement_logits = alpha * pre_refinement_diag_similarity + bias
 
     temporal_logits = base_logits.float()
-    evidence_map_aux = None
+    hypothesis_region_aux = None
     frame_matchability_aux = None
     temporal_match_aux = None
     absolute_mass_aux = None
@@ -2145,21 +2083,6 @@ def _build_frame_softmax_q2s_with_matchability(
         )
 
     if evidence_verification_enable:
-        evidence_tokens_all = (
-            matchability_evidence_tokens
-            if evidence_map_source == "raw"
-            else value_tokens
-        )
-        if tuple(evidence_tokens_all.shape[:3]) != tuple(value_tokens.shape[:3]):
-            raise ValueError(
-                "Evidence-map tokens must align with post values in B/T/N; got "
-                f"{tuple(evidence_tokens_all.shape)} and "
-                f"{tuple(value_tokens.shape)}."
-            )
-        evidence_query_tokens = evidence_tokens_all.index_select(
-            0,
-            query_indices,
-        )
         evidence_point_mask = query_point_mask
         if bool(_cfg_value(cfg, "EVIDENCE_USE_VISIBILITY", True)):
             query_visibility = metadata.get(
@@ -2170,21 +2093,41 @@ def _build_frame_softmax_q2s_with_matchability(
                 query_indices,
             )
             evidence_point_mask = evidence_point_mask & query_visibility
-        evidence_map_aux = build_query_evidence_map(
-            self,
-            evidence_query_tokens,
+        # Reuse the exact class-conditioned distribution pi that constructed
+        # Q_k. Specificity only reapplies its evidence-validity mask; it does
+        # not compute another text-to-patch similarity map.
+        hypothesis_weights = normalize_patch_region_weights(
+            query_patch_weights,
             evidence_point_mask,
-            episode_label_text,
-            temperature=float(
-                _cfg_value(cfg, "EVIDENCE_MAP_TEMPERATURE", 0.02)
-            ),
         )
+        hypothesis_frame_valid = evidence_point_mask.any(dim=-1)
+        hypothesis_effective_patches = (
+            1.0
+            / hypothesis_weights.square().sum(dim=-1).clamp_min(1e-12)
+        )
+        hypothesis_top1_mass = hypothesis_weights.max(dim=-1).values
+        hypothesis_effective_patches = torch.where(
+            hypothesis_frame_valid.unsqueeze(1),
+            hypothesis_effective_patches,
+            torch.zeros_like(hypothesis_effective_patches),
+        )
+        hypothesis_top1_mass = torch.where(
+            hypothesis_frame_valid.unsqueeze(1),
+            hypothesis_top1_mass,
+            torch.zeros_like(hypothesis_top1_mass),
+        )
+        hypothesis_region_aux = {
+            "weights": hypothesis_weights,
+            "frame_valid": hypothesis_frame_valid,
+            "effective_patches": hypothesis_effective_patches,
+            "top1_mass": hypothesis_top1_mass,
+        }
         frame_matchability_aux = (
             compute_evidence_conditioned_frame_matchability(
-                evidence_map_aux["weights"],
+                hypothesis_region_aux["weights"],
                 local_positive_similarity,
                 local_confuser_similarity,
-                evidence_map_aux["frame_valid"],
+                hypothesis_region_aux["frame_valid"],
                 local_positive_counts,
                 local_confuser_counts,
                 temperature=float(
@@ -2576,7 +2519,7 @@ def _build_frame_softmax_q2s_with_matchability(
                 "support_negative_count"
             ],
         })
-    if evidence_map_aux is not None:
+    if hypothesis_region_aux is not None:
         frame_valid = frame_matchability_aux["valid"].to(
             device=value_tokens.device,
         ).bool()
@@ -2593,20 +2536,17 @@ def _build_frame_softmax_q2s_with_matchability(
                 torch.full_like(mean, float(fallback)),
             )
 
-        evidence_effective = evidence_map_aux[
+        evidence_effective = hypothesis_region_aux[
             "effective_patches"
         ].expand_as(frame_matchability_aux["matchability"])
-        evidence_top1 = evidence_map_aux["top1_mass"].expand_as(
+        evidence_top1 = hypothesis_region_aux["top1_mass"].expand_as(
             frame_matchability_aux["matchability"]
         )
         result.update({
-            "query_evidence_patch_weights": evidence_map_aux["weights"].to(
+            "query_evidence_patch_weights": hypothesis_region_aux["weights"].to(
                 device=value_tokens.device,
                 dtype=value_tokens.dtype,
             ),
-            "query_evidence_patch_similarity": evidence_map_aux[
-                "similarity"
-            ].to(device=value_tokens.device, dtype=value_tokens.dtype),
             "query_evidence_patch_positive_response": (
                 local_positive_similarity.to(
                     device=value_tokens.device,

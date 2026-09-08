@@ -1,4 +1,4 @@
-"""Tests for Raw-Key evidence verification without Query patch rerouting."""
+"""Tests for Query-region specificity and absolute transport mass."""
 
 from types import SimpleNamespace
 
@@ -7,11 +7,11 @@ import torch
 
 from trokens.models.pointformer import Pointformer
 from trokens.models.query_class_matchability import (
-    build_query_evidence_map,
     classwise_frame_similarity,
     compute_evidence_conditioned_frame_matchability,
     compute_support_calibrated_frame_transport_mass,
     confidence_aware_bimhm_logits,
+    normalize_patch_region_weights,
 )
 
 
@@ -39,8 +39,6 @@ def _evidence_cfg(**overrides):
         "APPLY_DURING_TRAIN": True,
         "LOCAL_REFINEMENT_ENABLE": False,
         "EVIDENCE_VERIFICATION_ENABLE": True,
-        "EVIDENCE_MAP_SOURCE": "raw",
-        "EVIDENCE_MAP_TEMPERATURE": 0.07,
         "EVIDENCE_USE_VISIBILITY": True,
         "EVIDENCE_POSITIVE_AGGREGATION": "topk_mean",
         "EVIDENCE_POSITIVE_TOPK": 2,
@@ -74,29 +72,19 @@ def _evidence_cfg(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_raw_evidence_map_uses_pure_text_and_respects_mask():
-    model = _pointformer()
-    raw = torch.tensor(
-        [[[[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]]]],
+def test_query_region_weights_respect_visibility_and_renormalize():
+    weights = torch.tensor(
+        [[[[0.2, 0.3, 0.5]], [[0.0, 0.5, 0.5]]]],
         dtype=torch.float32,
     )
-    mask = torch.tensor([[[True, True, False]]])
-    result = build_query_evidence_map(
-        model,
-        raw,
-        mask,
-        torch.tensor([[1.0, 0.0], [0.0, 1.0]]),
-        temperature=0.05,
-    )
+    mask = torch.tensor([[[True, False, True]]])
+    normalized = normalize_patch_region_weights(weights, mask)
 
-    assert result["weights"].shape == (1, 2, 1, 3)
-    assert result["weights"][0, 0, 0, 0] > 0.99
-    assert result["weights"][0, 1, 0, 1] > 0.99
-    assert torch.count_nonzero(result["weights"][..., 2]) == 0
-    assert torch.allclose(
-        result["weights"].sum(dim=-1),
-        torch.ones(1, 2, 1),
+    assert normalized[0, 0, 0].tolist() == pytest.approx(
+        [2.0 / 7.0, 0.0, 5.0 / 7.0]
     )
+    assert normalized[0, 1, 0].tolist() == pytest.approx([0.0, 0.0, 1.0])
+    assert torch.allclose(normalized.sum(dim=-1), torch.ones(1, 2, 1))
 
 
 def test_frame_matchability_compares_identical_evidence_regions():
@@ -389,7 +377,16 @@ def test_wrapper_keeps_construction_route_and_ignores_query_targets():
         matchability_evidence_tokens=raw,
     )
 
+    _, expected_query_weights = model._compute_frame_softmax_text_prototypes(
+        post[-1],
+        point_mask[-1],
+        torch.eye(2),
+    )
     assert first["query_evidence_patch_weights"].shape == (1, 2, 1, 2)
+    assert torch.equal(
+        first["query_evidence_patch_weights"],
+        expected_query_weights.unsqueeze(0),
+    )
     assert first["query_frame_matchability"].shape == (1, 2, 1)
     assert first["query_partial_q2s_temporal_logits"].shape == (1, 2)
     assert torch.equal(
