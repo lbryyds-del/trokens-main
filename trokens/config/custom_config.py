@@ -92,12 +92,7 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_SOURCE = "post"
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.CALIBRATION_BETA = 0.25
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.TEMPERATURE = 0.10
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOG_PENALTY_WEIGHT = 0.25
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOG_EPS = 0.05
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DETACH_SUPPORT_STATS = True
-    # Keep raw rho for diagnostics but neutralize its penalty when labeled
-    # Support evidence is inverted for an episode class.
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.RELIABILITY_FALLBACK = False
     # Relative positive/confuser mode controls.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.MARGIN_TEMPERATURE = 0.10
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.MARGIN_BIAS = 0.0
@@ -162,10 +157,6 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DUAL_LOGIT_LOSS_ENABLE = False
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BASE_LOGIT_LOSS_WEIGHT = 0.50
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.VERIFIED_LOGIT_LOSS_WEIGHT = 0.50
-    # The SAV experiment explicitly enables the new penalty during training;
-    # the generic default remains conservative for callers that only want the
-    # diagnostic branch.
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.APPLY_DURING_TRAIN = False
 
     # point info config
     cfg.POINT_INFO = CfgNode()

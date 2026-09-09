@@ -435,7 +435,6 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
                     ),
                     "evidence": _aux_numpy("query_class_evidence"),
                     "threshold": _aux_numpy("query_class_threshold"),
-                    "log_penalty": _aux_numpy("query_class_log_penalty"),
                     "support_positive": _aux_numpy(
                         "support_positive_evidence_mean"
                     ),
@@ -524,7 +523,6 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
                     "temporal_score",
                     "matchability",
                     "evidence",
-                    "log_penalty",
                     "positive_similarity",
                     "hardest_confuser_similarity",
                     "relative_margin",
@@ -533,7 +531,6 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
                     "frame_confuser_evidence",
                     "frame_margin",
                     "frame_matchability",
-                    "frame_log_penalty",
                     "frame_effective_patches",
                     "frame_top1_mass",
                     "frame_temporal_delta",
@@ -647,11 +644,6 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
                             ),
                             "query_class_evidence": float(
                                 query_matchability_rows["evidence"][
-                                    query_idx, episode_idx
-                                ]
-                            ),
-                            "query_class_log_penalty": float(
-                                query_matchability_rows["log_penalty"][
                                     query_idx, episode_idx
                                 ]
                             ),

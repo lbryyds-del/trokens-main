@@ -9,7 +9,6 @@ import torch
 from trokens.config.defaults import get_cfg
 from trokens.models.pointformer import Pointformer
 from trokens.models.query_class_matchability import (
-    apply_log_matchability_penalty,
     build_class_confuser_prototypes,
     compute_relative_matchability,
     compute_matchability_from_similarity,
@@ -30,10 +29,6 @@ def _cfg(**overrides):
         "CALIBRATION_BETA": 0.25,
         "TEMPERATURE": 0.05,
         "DETACH_SUPPORT_STATS": True,
-        "LOG_PENALTY_WEIGHT": 0.25,
-        "LOG_EPS": 0.05,
-        "RELIABILITY_FALLBACK": False,
-        "APPLY_DURING_TRAIN": False,
         "MARGIN_TEMPERATURE": 0.10,
         "MARGIN_BIAS": 0.0,
         "NEGATIVE_AGGREGATION": "max",
@@ -92,9 +87,6 @@ def test_config_enables_matchability_and_disables_learned_null():
         cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.VERIFIED_LOGIT_LOSS_WEIGHT
         == 0.40
     )
-    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.APPLY_DURING_TRAIN is True
-
-
 def test_masked_topk_mean_ignores_invalid_entries():
     scores = torch.tensor([[0.9, 0.7, 100.0, -100.0]])
     mask = torch.tensor([[True, True, False, False]])
@@ -177,40 +169,6 @@ def test_query_targets_do_not_change_matchability():
     )
     assert torch.equal(result_a["matchability"], result_b["matchability"])
     assert torch.equal(result_a["threshold"], result_b["threshold"])
-
-
-def test_log_matchability_is_only_a_penalty_and_is_bounded():
-    base = torch.tensor([[2.0, -1.0]])
-    matchability = torch.tensor([[1.0, 0.0]])
-    final, penalty = apply_log_matchability_penalty(
-        base,
-        matchability,
-        _cfg(LOG_PENALTY_WEIGHT=0.5, LOG_EPS=0.1),
-    )
-
-    assert penalty[0, 0].item() == pytest.approx(0.0)
-    expected = 0.5 * torch.log(torch.tensor(0.1)).item()
-    assert penalty[0, 1].item() == pytest.approx(expected)
-    assert final[0, 0].item() == pytest.approx(base[0, 0].item())
-    assert final[0, 1].item() < base[0, 1].item()
-    assert torch.all(penalty <= 0.0)
-
-
-def test_unreliable_support_neutralizes_only_the_penalty():
-    base = torch.tensor([[2.0, -1.0]])
-    matchability = torch.tensor([[0.2, 0.2]])
-    reliable = torch.tensor([True, False])
-    final, penalty = apply_log_matchability_penalty(
-        base,
-        matchability,
-        _cfg(RELIABILITY_FALLBACK=True),
-        support_reliable=reliable,
-    )
-
-    assert penalty[0, 0].item() < 0.0
-    assert penalty[0, 1].item() == 0.0
-    assert final[0, 0].item() < base[0, 0].item()
-    assert final[0, 1].item() == pytest.approx(base[0, 1].item())
 
 
 def test_support_statistics_can_be_detached_without_blocking_query_gradient():
@@ -321,7 +279,7 @@ def test_build_confuser_prototypes_uses_support_labels_only():
     assert indices.tolist() == [0, 1]
 
 
-def test_relative_margin_penalty_is_used_during_training_when_enabled():
+def test_relative_margin_is_diagnostic_only_during_training():
     model = Pointformer.__new__(Pointformer)
     torch.nn.Module.__init__(model)
     model.cfg = SimpleNamespace(
@@ -329,7 +287,6 @@ def test_relative_margin_penalty_is_used_during_training_when_enabled():
             QUERY_CLASS_MATCHABILITY=_cfg(
                 ENABLE=True,
                 MODE="positive_confuser_margin",
-                APPLY_DURING_TRAIN=True,
             )
         ),
         POINT_INFO=SimpleNamespace(USE_PT_QUERY_MASK=True),
@@ -372,8 +329,11 @@ def test_relative_margin_penalty_is_used_during_training_when_enabled():
 
     model.train()
     aux = model._build_frame_softmax_q2s_aux(value_tokens, metadata)
-    assert torch.any(aux["query_class_log_penalty"] < 0.0)
-    assert not torch.equal(
+    assert torch.equal(
+        aux["query_partial_q2s_logits"],
+        aux["query_partial_q2s_temporal_logits"],
+    )
+    assert torch.equal(
         aux["query_partial_q2s_logits"],
         aux["query_partial_q2s_base_logits"],
     )
@@ -388,7 +348,6 @@ def test_relative_margin_ignores_query_label_rows():
     cfg = _cfg(
         ENABLE=True,
         MODE="positive_confuser_margin",
-        APPLY_DURING_TRAIN=True,
     )
     model.cfg = SimpleNamespace(
         FEW_SHOT=SimpleNamespace(QUERY_CLASS_MATCHABILITY=cfg),
@@ -438,7 +397,7 @@ def test_relative_margin_ignores_query_label_rows():
     )
 
 
-def test_matchability_penalty_is_inference_only_by_default():
+def test_global_matchability_does_not_change_final_logits():
     model = Pointformer.__new__(Pointformer)
     torch.nn.Module.__init__(model)
     model.cfg = SimpleNamespace(
@@ -475,15 +434,15 @@ def test_matchability_penalty_is_inference_only_by_default():
         ),
     }
 
-    model.train()
-    train_aux = model._build_frame_softmax_q2s_aux(value_tokens, metadata)
-    assert torch.equal(
-        train_aux["query_partial_q2s_logits"],
-        train_aux["query_partial_q2s_base_logits"],
-    )
-    assert torch.count_nonzero(train_aux["query_class_log_penalty"]) == 0
-
-    model.eval()
-    test_aux = model._build_frame_softmax_q2s_aux(value_tokens, metadata)
-    assert torch.all(test_aux["query_class_log_penalty"] <= 0.0)
-    assert torch.count_nonzero(test_aux["query_class_log_penalty"]) > 0
+    for training in (True, False):
+        model.train(training)
+        aux = model._build_frame_softmax_q2s_aux(value_tokens, metadata)
+        assert torch.equal(
+            aux["query_partial_q2s_logits"],
+            aux["query_partial_q2s_temporal_logits"],
+        )
+        assert torch.equal(
+            aux["query_partial_q2s_logits"],
+            aux["query_partial_q2s_base_logits"],
+        )
+        assert torch.isfinite(aux["query_class_matchability"]).all()

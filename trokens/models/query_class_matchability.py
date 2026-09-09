@@ -1614,54 +1614,6 @@ def compute_matchability_from_similarity(
     }
 
 
-def apply_log_matchability_penalty(
-    base_logits: torch.Tensor,
-    matchability: torch.Tensor,
-    cfg: Any,
-    support_reliable: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Apply a non-positive log-matchability penalty to q2s logits."""
-    if tuple(base_logits.shape) != tuple(matchability.shape):
-        raise ValueError(
-            "base_logits and matchability must have the same [Q,K] shape; got "
-            f"{tuple(base_logits.shape)} and {tuple(matchability.shape)}."
-        )
-    weight = float(_cfg_value(cfg, "LOG_PENALTY_WEIGHT", 0.25))
-    log_eps = float(_cfg_value(cfg, "LOG_EPS", 0.05))
-    if weight < 0.0:
-        raise ValueError("LOG_PENALTY_WEIGHT must be non-negative.")
-    if not 0.0 < log_eps <= 1.0:
-        raise ValueError("LOG_EPS must be in (0, 1].")
-
-    penalty = weight * torch.log(matchability.float().clamp_min(log_eps))
-    if bool(_cfg_value(cfg, "RELIABILITY_FALLBACK", False)):
-        if support_reliable is None:
-            raise ValueError(
-                "support_reliable is required when RELIABILITY_FALLBACK is enabled."
-            )
-        support_reliable = support_reliable.to(
-            device=penalty.device,
-            dtype=torch.bool,
-        )
-        if tuple(support_reliable.shape) != (penalty.shape[-1],):
-            raise ValueError(
-                "support_reliable must have shape [K]; got "
-                f"{tuple(support_reliable.shape)}, expected {(penalty.shape[-1],)}."
-            )
-        penalty = torch.where(
-            support_reliable.unsqueeze(0),
-            penalty,
-            torch.zeros_like(penalty),
-        )
-    final_logits = torch.nan_to_num(
-        base_logits.float() + penalty,
-        nan=0.0,
-        posinf=1e4,
-        neginf=-1e4,
-    )
-    return final_logits, penalty
-
-
 def _build_frame_softmax_q2s_with_matchability(
     self: Any,
     value_tokens: torch.Tensor,
@@ -1961,8 +1913,8 @@ def _build_frame_softmax_q2s_with_matchability(
                 _cfg_value(cfg, "LOCAL_LOGIT_STRENGTH", 0.50)
             ),
         )
-        # The refined prototypes are the Query values used by both the base
-        # q2s score and the optional global matchability penalty.
+        # The refined prototypes are the Query values used by the base q2s
+        # score; global matchability is retained only as a diagnostic.
         query_prototypes = local_refinement["refined_prototypes"]
         base_query_prototypes = local_refinement["base_prototypes"]
         query_patch_weights = local_refinement["refined_weights"]
@@ -2288,17 +2240,10 @@ def _build_frame_softmax_q2s_with_matchability(
             ),
             "confuser_valid_count": matchability_aux["support_negative_count"],
         })
-    apply_during_train = bool(_cfg_value(cfg, "APPLY_DURING_TRAIN", False))
-    if bool(getattr(self, "training", False)) and not apply_during_train:
-        final_logits = base_logits.float()
-        log_penalty = torch.zeros_like(final_logits)
-    else:
-        final_logits, log_penalty = apply_log_matchability_penalty(
-            temporal_logits,
-            matchability_aux["matchability"],
-            cfg,
-            support_reliable=matchability_aux["support_reliable"],
-        )
+    # The unified three-state target mass is the only frame/class correction.
+    # Global Positive/Confuser statistics remain available for diagnostics, but
+    # are deliberately not applied as a second post-hoc log penalty.
+    final_logits = temporal_logits.float()
 
     if absolute_mass_aux is None:
         query_transport_mass_summary = matchability_aux["matchability"]
@@ -2387,7 +2332,6 @@ def _build_frame_softmax_q2s_with_matchability(
         "query_class_transport_mass": query_transport_mass_summary,
         "query_class_evidence": matchability_aux["query_evidence"],
         "query_class_threshold": matchability_aux["threshold"],
-        "query_class_log_penalty": log_penalty,
         "query_class_positive_similarity": matchability_aux[
             "positive_similarity"
         ],

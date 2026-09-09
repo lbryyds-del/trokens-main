@@ -65,11 +65,7 @@ FEW_SHOT:
     # Legacy threshold = negative Support evidence + beta * positive/negative gap.
     CALIBRATION_BETA: 0.25
     TEMPERATURE: 0.10
-    # Final q2s = original q2s + weight * log(matchability).
-    LOG_PENALTY_WEIGHT: 0.25
-    LOG_EPS: 0.05
     DETACH_SUPPORT_STATS: True
-    RELIABILITY_FALLBACK: False
     MARGIN_TEMPERATURE: 0.10
     MARGIN_BIAS: 0.0
     NEGATIVE_AGGREGATION: "max"
@@ -121,16 +117,13 @@ FEW_SHOT:
     ABSOLUTE_MASS_RELIABILITY_FALLBACK: True
     ABSOLUTE_MASS_TRANSPORT_STRENGTH: 1.0
     # At m=0 the visual match is neutral (cosine 0), then the existing -2
-    # q2s bias and global relative penalty still apply.
+    # q2s bias still applies.
     ABSOLUTE_MASS_UNMATCHED_COST: 0.0
     ABSOLUTE_MASS_ONE_SIDED: True
     # Train both the untouched base matcher and the verified matcher.
     DUAL_LOGIT_LOSS_ENABLE: True
     BASE_LOGIT_LOSS_WEIGHT: 0.60
     VERIFIED_LOGIT_LOSS_WEIGHT: 0.40
-    # User-requested first training run: include the relative penalty in q2s
-    # BCE during training as well as in evaluation.
-    APPLY_DURING_TRAIN: True
   TEXT_ALIGN:
     ENABLE: False
     LOSS_WEIGHT: 0.1

@@ -608,10 +608,6 @@ def get_query_matchability_metrics(few_shot_aux, q2s_labels):
         "query_class_relative_margin",
         few_shot_aux.get("query_class_evidence", torch.zeros_like(matchability)),
     )
-    penalty = _pair_tensor(
-        "query_class_log_penalty",
-        torch.zeros_like(matchability),
-    )
 
     positive_mask = labels > 0.5
     negative_mask = ~positive_mask
@@ -655,7 +651,6 @@ def get_query_matchability_metrics(few_shot_aux, q2s_labels):
             matchability.float(),
             negative_mask,
         ),
-        "matchability_penalty_mean": penalty.mean(),
     }
     local_positive = _pair_tensor("query_local_positive_similarity_mean")
     local_confuser = _pair_tensor("query_local_confuser_similarity_mean")

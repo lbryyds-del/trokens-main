@@ -28,16 +28,12 @@ def _evidence_cfg(**overrides):
         "ENABLE": True,
         "MODE": "positive_confuser_margin",
         "EVIDENCE_SOURCE": "post",
-        "LOG_PENALTY_WEIGHT": 0.0,
-        "LOG_EPS": 0.05,
-        "RELIABILITY_FALLBACK": False,
         "MARGIN_TEMPERATURE": 0.10,
         "MARGIN_BIAS": 0.0,
         "NEGATIVE_AGGREGATION": "max",
         "NEGATIVE_TOPK": 2,
         "NEGATIVE_TEMPERATURE": 0.10,
         "DETACH_CONFUSER_SUPPORT": True,
-        "APPLY_DURING_TRAIN": True,
         "LOCAL_REFINEMENT_ENABLE": False,
         "EVIDENCE_VERIFICATION_ENABLE": True,
         "EVIDENCE_USE_VISIBILITY": True,
@@ -332,9 +328,8 @@ def test_wrapper_keeps_construction_route_and_ignores_query_targets():
     ].clone()
     changed["episode_positive_labels"][-1] = torch.tensor([0, 1])
 
-    # Exercise the actual meta-training path: APPLY_DURING_TRAIN=True keeps
-    # both frame/global verification active, while Query targets remain loss-
-    # only and cannot change routing outputs.
+    # Exercise the actual meta-training path; Query targets remain loss-only
+    # and cannot change routing outputs.
     model.train()
     first = model._build_frame_softmax_q2s_aux(
         post,
@@ -376,7 +371,6 @@ def test_wrapper_preserves_explicit_patch_plus_unmatched_mass():
     cfg = _evidence_cfg(
         EVIDENCE_VERIFICATION_ENABLE=False,
         ABSOLUTE_MASS_ENABLE=True,
-        LOG_PENALTY_WEIGHT=0.0,
     )
     model.cfg = SimpleNamespace(
         FEW_SHOT=SimpleNamespace(QUERY_CLASS_MATCHABILITY=cfg),
