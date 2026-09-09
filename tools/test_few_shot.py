@@ -478,9 +478,6 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
                     "frame_matchability": _aux_numpy(
                         "query_frame_matchability_mean"
                     ),
-                    "frame_log_penalty": _aux_numpy(
-                        "query_frame_log_penalty_mean"
-                    ),
                     "frame_effective_patches": _aux_numpy(
                         "query_evidence_effective_patches_mean"
                     ),
@@ -679,7 +676,6 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
                             ),
                             "query_frame_relative_margin": "frame_margin",
                             "query_frame_matchability": "frame_matchability",
-                            "query_frame_log_penalty": "frame_log_penalty",
                             "query_evidence_effective_patches": (
                                 "frame_effective_patches"
                             ),

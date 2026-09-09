@@ -98,20 +98,17 @@ FEW_SHOT:
     EVIDENCE_CONFUSER_TOPK: 2
     EVIDENCE_AGGREGATION_TEMPERATURE: 0.10
     EVIDENCE_DETACH_REFERENCES: True
-    # Apply frame confidence to the complete bidirectional BiMHM in the
-    # document recipe.
+    # Relative target-vs-confuser evidence is combined with absolute mass
+    # below into one target-state mass before bidirectional BiMHM.
     FRAME_MARGIN_TEMPERATURE: 0.10
     FRAME_MARGIN_BIAS: 0.0
-    FRAME_LOG_PENALTY_WEIGHT: 0.10
-    FRAME_LOG_EPS: 0.05
-    FRAME_PENALTY_DIRECTION: "both"
     # Weak video-label supervision over the strongest Evidence margins.
     EVIDENCE_VIDEO_TOPK_FRAMES: 3
     EVIDENCE_MIL_TEMPERATURE: 0.10
     EVIDENCE_MIL_LOSS_WEIGHT: 0.10
-    # Full absolute-mass route: pure-text Raw evidence is calibrated by the
-    # labeled Support set.  Patch weights sum to m (not one), while 1-m is
-    # retained as unmatched mass inside both BiMHM directions.
+    # Pure-text Raw evidence supplies absolute non-null mass m. Together with
+    # frame specificity rho, the single transported target mass is g=m*rho;
+    # the rejected confuser/null mass remains outside both BiMHM directions.
     ABSOLUTE_MASS_ENABLE: True
     ABSOLUTE_MASS_SOURCE: "raw"
     ABSOLUTE_MASS_USE_VISIBILITY: True

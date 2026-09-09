@@ -903,6 +903,39 @@ def compute_evidence_conditioned_frame_matchability(
     }
 
 
+def factorize_frame_hypothesis_states(
+    absolute_mass: torch.Tensor,
+    relative_matchability: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    """Factor one candidate frame into target, confuser, and null states.
+
+    ``absolute_mass`` is the non-null probability ``m`` and
+    ``relative_matchability`` is the conditional target probability ``rho``.
+    The returned states are ``p+=m*rho``, ``p-=m*(1-rho)`` and ``p0=1-m``.
+    They are non-negative and sum to one for every Query/class/frame row.
+    """
+    if tuple(absolute_mass.shape) != tuple(relative_matchability.shape):
+        raise ValueError(
+            "absolute_mass and relative_matchability must have the same "
+            f"shape; got {tuple(absolute_mass.shape)} and "
+            f"{tuple(relative_matchability.shape)}."
+        )
+    mass = torch.nan_to_num(
+        absolute_mass.float(), nan=1.0, posinf=1.0, neginf=0.0
+    ).clamp(0.0, 1.0)
+    specificity = torch.nan_to_num(
+        relative_matchability.float(), nan=1.0, posinf=1.0, neginf=0.0
+    ).clamp(0.0, 1.0)
+    target_mass = mass * specificity
+    confuser_mass = mass * (1.0 - specificity)
+    null_mass = 1.0 - mass
+    return {
+        "target_mass": target_mass,
+        "confuser_mass": confuser_mass,
+        "null_mass": null_mass,
+    }
+
+
 def compute_support_calibrated_frame_transport_mass(
     similarity: torch.Tensor,
     point_mask: torch.Tensor,
@@ -1142,45 +1175,32 @@ def classwise_frame_similarity(
     ).clamp(-1.0, 1.0)
 
 
-def confidence_aware_bimhm_logits(
+def hypothesis_mass_bimhm_logits(
     frame_similarity: torch.Tensor,
-    frame_matchability: torch.Tensor,
+    target_mass: torch.Tensor,
     base_logits: torch.Tensor,
     alpha: float = 10.0,
-    penalty_weight: float = 0.05,
-    eps: float = 0.05,
-    direction: str = "support_to_query",
-    frame_transport_mass: Optional[torch.Tensor] = None,
     transport_strength: float = 1.0,
     unmatched_cost: float = 0.0,
     one_sided_transport: bool = True,
 ) -> Dict[str, torch.Tensor]:
-    """Apply relative confidence and explicit unmatched mass inside BiMHM.
+    """Apply target hypothesis mass before both BiMHM reductions.
 
-    ``support_to_query`` preserves the controlled first ablation and modifies
-    only the Support-to-Query ``max_t``.  ``both`` implements the complete
-    document formula by applying the same Query-frame penalty to both BiMHM
-    reductions.  Expressing either result as a delta from ``base_logits``
-    guarantees a bitwise no-op when ``penalty_weight`` is zero and preserves
-    the existing matcher bias exactly.
-
-    When ``frame_transport_mass`` is supplied, each Query-frame/class pair has
-    matched patch mass ``m`` and unmatched mass ``1-m``.  In cosine units its
-    pair score is ``m*C - unmatched_cost*(1-m)``.  This is evaluated before
-    both BiMHM maxima, so normalizing the visual prototype cannot cancel the
-    mass.  ``one_sided_transport`` prevents abstention from increasing an
-    already-low visual score.
+    Each Query/class/frame candidate transports ``target_mass`` and rejects
+    the remainder. Its cosine contribution is
+    ``g*C - unmatched_cost*(1-g)`` before the temporal maxima. The optional
+    one-sided rule prevents rejection from increasing a negative similarity.
     """
     if frame_similarity.ndim != 4:
         raise ValueError(
             "frame_similarity must have shape [Q,K,Tq,Ts]; got "
             f"{tuple(frame_similarity.shape)}."
         )
-    expected_rho = frame_similarity.shape[:3]
-    if tuple(frame_matchability.shape) != tuple(expected_rho):
+    expected_mass = frame_similarity.shape[:3]
+    if tuple(target_mass.shape) != tuple(expected_mass):
         raise ValueError(
-            "frame_matchability must have shape [Q,K,Tq]; got "
-            f"{tuple(frame_matchability.shape)}, expected {tuple(expected_rho)}."
+            "target_mass must have shape [Q,K,Tq]; got "
+            f"{tuple(target_mass.shape)}, expected {tuple(expected_mass)}."
         )
     if tuple(base_logits.shape) != tuple(frame_similarity.shape[:2]):
         raise ValueError(
@@ -1188,31 +1208,19 @@ def confidence_aware_bimhm_logits(
             f"{tuple(base_logits.shape)}."
         )
     alpha = float(alpha)
-    penalty_weight = float(penalty_weight)
-    eps = float(eps)
     transport_strength = float(transport_strength)
     unmatched_cost = float(unmatched_cost)
     finite = bool(torch.isfinite(torch.tensor([
         alpha,
-        penalty_weight,
-        eps,
         transport_strength,
         unmatched_cost,
     ])).all())
-    if not finite or alpha <= 0.0 or penalty_weight < 0.0:
-        raise ValueError("alpha must be positive and penalty_weight non-negative.")
-    if not 0.0 < eps <= 1.0:
-        raise ValueError("Frame log eps must be in (0, 1].")
+    if not finite or alpha <= 0.0:
+        raise ValueError("alpha must be positive and all scalars finite.")
     if not 0.0 <= transport_strength <= 1.0:
         raise ValueError("transport_strength must be in [0, 1].")
     if unmatched_cost < 0.0:
         raise ValueError("unmatched_cost must be non-negative.")
-    direction = str(direction).lower()
-    if direction not in {"support_to_query", "both"}:
-        raise ValueError(
-            "FRAME_PENALTY_DIRECTION must be 'support_to_query' or 'both'."
-        )
-
     frame_similarity_fp32 = torch.nan_to_num(
         frame_similarity.float(),
         nan=0.0,
@@ -1220,71 +1228,44 @@ def confidence_aware_bimhm_logits(
         neginf=-1.0,
     ).clamp(-1.0, 1.0)
     similarity_logits = alpha * frame_similarity_fp32
-    frame_penalty = penalty_weight * torch.log(
-        torch.nan_to_num(
-            frame_matchability.float(),
-            nan=1.0,
-            posinf=1.0,
-            neginf=0.0,
-        ).clamp_min(eps)
+    raw_mass = torch.nan_to_num(
+        target_mass.float(),
+        nan=1.0,
+        posinf=1.0,
+        neginf=0.0,
+    ).clamp(0.0, 1.0)
+    effective_patch_mass = 1.0 - transport_strength * (1.0 - raw_mass)
+    unmatched_mass = 1.0 - effective_patch_mass
+    transported_similarity = (
+        effective_patch_mass.unsqueeze(-1) * frame_similarity_fp32
+        - unmatched_cost * unmatched_mass.unsqueeze(-1)
     )
-    if frame_transport_mass is None or transport_strength == 0.0:
-        effective_patch_mass = torch.ones_like(frame_matchability.float())
-        unmatched_mass = torch.zeros_like(effective_patch_mass)
-        transported_similarity = frame_similarity_fp32
-        transport_enabled = False
-    else:
-        if tuple(frame_transport_mass.shape) != tuple(expected_rho):
-            raise ValueError(
-                "frame_transport_mass must have shape [Q,K,Tq]; got "
-                f"{tuple(frame_transport_mass.shape)}, expected {tuple(expected_rho)}."
-            )
-        raw_mass = torch.nan_to_num(
-            frame_transport_mass.float(),
-            nan=1.0,
-            posinf=1.0,
-            neginf=0.0,
-        ).clamp(0.0, 1.0)
-        effective_patch_mass = 1.0 - transport_strength * (1.0 - raw_mass)
-        unmatched_mass = 1.0 - effective_patch_mass
-        transported_similarity = (
-            effective_patch_mass.unsqueeze(-1) * frame_similarity_fp32
-            - unmatched_cost * unmatched_mass.unsqueeze(-1)
+    if one_sided_transport:
+        transported_similarity = torch.minimum(
+            transported_similarity,
+            frame_similarity_fp32,
         )
-        if one_sided_transport:
-            transported_similarity = torch.minimum(
-                transported_similarity,
-                frame_similarity_fp32,
-            )
-        transport_enabled = True
 
     base_q_to_s = similarity_logits.max(dim=-1).values.mean(dim=-1)
     base_s_to_q, base_winner = similarity_logits.max(dim=-2)
     transported_pair_logits = alpha * transported_similarity
-    transport_only_q_to_s = transported_pair_logits.max(dim=-1).values.mean(dim=-1)
-    transport_only_s_to_q = transported_pair_logits.max(dim=-2).values.mean(dim=-1)
-    transport_delta = 0.5 * (
-        transport_only_q_to_s
-        + transport_only_s_to_q
-        - base_q_to_s
-        - base_s_to_q.mean(dim=-1)
+    transported_q_to_s = transported_pair_logits.max(
+        dim=-1
+    ).values.mean(dim=-1)
+    transported_s_to_q, transported_winner = transported_pair_logits.max(
+        dim=-2
     )
-    verified_pair_logits = transported_pair_logits + frame_penalty.unsqueeze(-1)
-    verified_q_to_s = verified_pair_logits.max(dim=-1).values.mean(dim=-1)
-    verified_s_to_q, verified_winner = verified_pair_logits.max(dim=-2)
-    q_to_s_delta = verified_q_to_s - base_q_to_s
-    s_to_q_delta = verified_s_to_q.mean(dim=-1) - base_s_to_q.mean(dim=-1)
-    if direction == "both":
-        temporal_delta = 0.5 * (q_to_s_delta + s_to_q_delta)
-    else:
-        temporal_delta = 0.5 * s_to_q_delta
-    temporal_logits = base_logits.float() + temporal_delta
-    if penalty_weight == 0.0 and not transport_enabled:
-        # Besides making the mathematical no-op explicit, this avoids tiny
-        # recomputation drift in strict paired regression tests.
+    q_to_s_delta = transported_q_to_s - base_q_to_s
+    s_to_q_delta = (
+        transported_s_to_q.mean(dim=-1) - base_s_to_q.mean(dim=-1)
+    )
+    transport_delta = 0.5 * (q_to_s_delta + s_to_q_delta)
+    temporal_logits = base_logits.float() + transport_delta
+    if transport_strength == 0.0:
+        # Avoid tiny recomputation drift in strict no-op regression tests.
         temporal_logits = base_logits.float()
     winner_switch_fraction = (
-        verified_winner.ne(base_winner).float().mean(dim=-1)
+        transported_winner.ne(base_winner).float().mean(dim=-1)
     )
     return {
         "logits": torch.nan_to_num(
@@ -1293,13 +1274,7 @@ def confidence_aware_bimhm_logits(
             posinf=1e4,
             neginf=-1e4,
         ),
-        "frame_penalty": torch.nan_to_num(
-            frame_penalty,
-            nan=0.0,
-            posinf=0.0,
-            neginf=-1e4,
-        ),
-        "pair_logits": verified_pair_logits,
+        "pair_logits": transported_pair_logits,
         "transported_similarity": transported_similarity,
         "effective_patch_mass": effective_patch_mass,
         "unmatched_mass": unmatched_mass,
@@ -1307,7 +1282,7 @@ def confidence_aware_bimhm_logits(
         "q_to_s_delta": q_to_s_delta,
         "s_to_q_delta": s_to_q_delta,
         "base_winner": base_winner,
-        "verified_winner": verified_winner,
+        "verified_winner": transported_winner,
         "winner_switch_fraction": winner_switch_fraction,
     }
 
@@ -2051,6 +2026,7 @@ def _build_frame_softmax_q2s_with_matchability(
     frame_matchability_aux = None
     temporal_match_aux = None
     absolute_mass_aux = None
+    frame_hypothesis_states = None
     if absolute_mass_enable:
         absolute_tokens_all = (
             matchability_evidence_tokens
@@ -2147,31 +2123,25 @@ def _build_frame_softmax_q2s_with_matchability(
                 device=value_tokens.device,
                 dtype=torch.float32,
             )
-            frame_penalty_weight = 0.0
         else:
             frame_matchability = frame_matchability_aux["matchability"]
-            frame_penalty_weight = float(
-                _cfg_value(cfg, "FRAME_LOG_PENALTY_WEIGHT", 0.05)
-            )
-        temporal_match_aux = confidence_aware_bimhm_logits(
-            positive_frame_similarity,
+        absolute_patch_mass = (
+            absolute_mass_aux["patch_mass"]
+            if absolute_mass_aux is not None
+            else torch.ones_like(frame_matchability)
+        )
+        # This is now the only frame-level verification path.  With one
+        # factor disabled its fallback is exactly one, giving quality-only
+        # g=m or specificity-only g=rho without a separate implementation.
+        frame_hypothesis_states = factorize_frame_hypothesis_states(
+            absolute_patch_mass,
             frame_matchability,
+        )
+        temporal_match_aux = hypothesis_mass_bimhm_logits(
+            positive_frame_similarity,
+            frame_hypothesis_states["target_mass"],
             base_logits,
             alpha=alpha,
-            penalty_weight=frame_penalty_weight,
-            eps=float(_cfg_value(cfg, "FRAME_LOG_EPS", 0.05)),
-            direction=str(
-                _cfg_value(
-                    cfg,
-                    "FRAME_PENALTY_DIRECTION",
-                    "support_to_query",
-                )
-            ),
-            frame_transport_mass=(
-                absolute_mass_aux["patch_mass"]
-                if absolute_mass_aux is not None
-                else None
-            ),
             transport_strength=float(
                 _cfg_value(cfg, "ABSOLUTE_MASS_TRANSPORT_STRENGTH", 1.0)
             ),
@@ -2432,6 +2402,18 @@ def _build_frame_softmax_q2s_with_matchability(
             "confuser_valid_count"
         ],
     }
+    if frame_hypothesis_states is not None:
+        result.update({
+            "query_frame_target_mass": frame_hypothesis_states[
+                "target_mass"
+            ].to(device=value_tokens.device, dtype=value_tokens.dtype),
+            "query_frame_confuser_mass": frame_hypothesis_states[
+                "confuser_mass"
+            ].to(device=value_tokens.device, dtype=value_tokens.dtype),
+            "query_frame_null_mass": frame_hypothesis_states[
+                "null_mass"
+            ].to(device=value_tokens.device, dtype=value_tokens.dtype),
+        })
     if absolute_mass_aux is not None:
         effective_patch_mass = temporal_match_aux["effective_patch_mass"]
         unmatched_mass = temporal_match_aux["unmatched_mass"]
@@ -2476,6 +2458,9 @@ def _build_frame_softmax_q2s_with_matchability(
             ].to(device=value_tokens.device, dtype=value_tokens.dtype),
             "query_frame_absolute_mass_raw": absolute_mass_aux[
                 "raw_patch_mass"
+            ].to(device=value_tokens.device, dtype=value_tokens.dtype),
+            "query_frame_absolute_patch_mass": absolute_mass_aux[
+                "patch_mass"
             ].to(device=value_tokens.device, dtype=value_tokens.dtype),
             "query_frame_patch_mass": effective_patch_mass.to(
                 device=value_tokens.device,
@@ -2575,9 +2560,6 @@ def _build_frame_softmax_q2s_with_matchability(
             "query_frame_confuser_available": frame_matchability_aux[
                 "class_valid"
             ].to(device=value_tokens.device, dtype=torch.bool),
-            "query_frame_log_penalty": temporal_match_aux[
-                "frame_penalty"
-            ].to(device=value_tokens.device, dtype=value_tokens.dtype),
             "query_frame_positive_evidence_mean": _evidence_frame_mean(
                 frame_matchability_aux["positive_evidence"]
             ),
@@ -2590,9 +2572,6 @@ def _build_frame_softmax_q2s_with_matchability(
             "query_frame_matchability_mean": _evidence_frame_mean(
                 frame_matchability_aux["matchability"],
                 fallback=1.0,
-            ),
-            "query_frame_log_penalty_mean": _evidence_frame_mean(
-                temporal_match_aux["frame_penalty"]
             ),
             "query_evidence_effective_patches_mean": _evidence_frame_mean(
                 evidence_effective

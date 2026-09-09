@@ -699,7 +699,6 @@ def get_query_matchability_metrics(few_shot_aux, q2s_labels):
         ),
         "frame_margin": _pair_tensor("query_frame_relative_margin_mean"),
         "frame_rho": _pair_tensor("query_frame_matchability_mean"),
-        "frame_penalty": _pair_tensor("query_frame_log_penalty_mean"),
         "frame_temporal_delta": _pair_tensor(
             "query_frame_temporal_logit_delta"
         ),

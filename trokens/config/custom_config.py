@@ -137,21 +137,13 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_DETACH_REFERENCES = True
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.FRAME_MARGIN_TEMPERATURE = 0.10
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.FRAME_MARGIN_BIAS = 0.0
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.FRAME_LOG_PENALTY_WEIGHT = 0.05
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.FRAME_LOG_EPS = 0.05
-    # The first controlled version modifies only the Support-to-Query max_t
-    # direction.  Query-to-Support remains bitwise on the original route.
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.FRAME_PENALTY_DIRECTION = (
-        "support_to_query"
-    )
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_VIDEO_TOPK_FRAMES = 3
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_MIL_TEMPERATURE = 0.10
     # Disabled generically; individual experiments can opt into the
     # video-label MIL objective without changing compatibility callers.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_MIL_LOSS_WEIGHT = 0.0
-    # Optional Support-calibrated absolute transport mass.  Unlike the
-    # patch-wise Softmax, this mass may approach zero.  The remaining mass is
-    # retained as an explicit unmatched state by the frame matcher.
+    # Optional Support-calibrated absolute non-null mass. When frame evidence
+    # is also enabled, the matcher transports only target mass g=m*rho.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_ENABLE = False
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_SOURCE = "raw"
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_USE_VISIBILITY = True

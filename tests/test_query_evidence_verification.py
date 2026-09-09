@@ -10,7 +10,8 @@ from trokens.models.query_class_matchability import (
     classwise_frame_similarity,
     compute_evidence_conditioned_frame_matchability,
     compute_support_calibrated_frame_transport_mass,
-    confidence_aware_bimhm_logits,
+    factorize_frame_hypothesis_states,
+    hypothesis_mass_bimhm_logits,
     normalize_patch_region_weights,
 )
 
@@ -48,9 +49,6 @@ def _evidence_cfg(**overrides):
         "EVIDENCE_DETACH_REFERENCES": True,
         "FRAME_MARGIN_TEMPERATURE": 0.10,
         "FRAME_MARGIN_BIAS": 0.0,
-        "FRAME_LOG_PENALTY_WEIGHT": 0.10,
-        "FRAME_LOG_EPS": 0.05,
-        "FRAME_PENALTY_DIRECTION": "both",
         "EVIDENCE_VIDEO_TOPK_FRAMES": 3,
         "EVIDENCE_MIL_TEMPERATURE": 0.10,
         "EVIDENCE_MIL_LOSS_WEIGHT": 0.10,
@@ -105,6 +103,44 @@ def test_frame_matchability_compares_identical_evidence_regions():
     assert result["confuser_evidence"].item() == pytest.approx(0.2)
     assert result["margin"].item() == pytest.approx(0.4)
     assert result["matchability"].item() > 0.98
+
+
+def test_frame_hypothesis_states_factorize_mass_and_specificity():
+    result = factorize_frame_hypothesis_states(
+        torch.tensor([[[0.8, 1.0, 0.2]]]),
+        torch.tensor([[[0.6, 0.25, 1.0]]]),
+    )
+
+    assert result["target_mass"].flatten().tolist() == pytest.approx(
+        [0.48, 0.25, 0.20]
+    )
+    assert result["confuser_mass"].flatten().tolist() == pytest.approx(
+        [0.32, 0.75, 0.00]
+    )
+    assert result["null_mass"].flatten().tolist() == pytest.approx(
+        [0.20, 0.00, 0.80]
+    )
+    total = (
+        result["target_mass"]
+        + result["confuser_mass"]
+        + result["null_mass"]
+    )
+    assert torch.allclose(total, torch.ones_like(total))
+
+
+def test_frame_hypothesis_states_reduce_to_each_single_factor():
+    value = torch.tensor([[[0.2, 0.7]]])
+    quality_only = factorize_frame_hypothesis_states(
+        value,
+        torch.ones_like(value),
+    )
+    specificity_only = factorize_frame_hypothesis_states(
+        torch.ones_like(value),
+        value,
+    )
+
+    assert torch.equal(quality_only["target_mass"], value)
+    assert torch.equal(specificity_only["target_mass"], value)
 
 
 def test_support_calibrated_absolute_mass_can_abstain_per_frame():
@@ -186,91 +222,28 @@ def test_missing_confuser_or_frame_is_a_strict_noop():
     assert not result["class_valid"].item()
 
 
-def test_zero_frame_penalty_exactly_recovers_base_logits():
+def test_zero_transport_strength_exactly_recovers_base_logits():
     similarity = torch.tensor([[[[0.9], [0.8]]]])
-    rho = torch.tensor([[[0.01, 1.0]]])
+    target_mass = torch.tensor([[[0.01, 1.0]]])
     base = torch.tensor([[7.25]])
-    result = confidence_aware_bimhm_logits(
+    result = hypothesis_mass_bimhm_logits(
         similarity,
-        rho,
+        target_mass,
         base,
         alpha=10.0,
-        penalty_weight=0.0,
+        transport_strength=0.0,
     )
     assert torch.equal(result["logits"], base)
-    assert torch.count_nonzero(result["frame_penalty"]) == 0
-
-
-def test_frame_penalty_can_switch_only_support_to_query_winner():
-    similarity = torch.tensor([[[[0.90], [0.88]]]])
-    rho = torch.tensor([[[0.01, 1.0]]])
-    base = torch.tensor([[6.9]])
-    result = confidence_aware_bimhm_logits(
-        similarity,
-        rho,
-        base,
-        alpha=10.0,
-        penalty_weight=0.10,
-        eps=0.05,
-    )
-
-    assert result["base_winner"].item() == 0
-    assert result["verified_winner"].item() == 1
-    assert result["winner_switch_fraction"].item() == 1.0
-    assert result["logits"].item() < base.item()
-
-
-def test_bidirectional_frame_penalty_updates_both_bimhm_reductions():
-    similarity = torch.tensor([[[[0.90], [0.80]]]])
-    rho = torch.tensor([[[0.50, 1.00]]])
-    base = torch.tensor([[7.25]])
-    support_only = confidence_aware_bimhm_logits(
-        similarity,
-        rho,
-        base,
-        alpha=10.0,
-        penalty_weight=0.10,
-        eps=0.05,
-        direction="support_to_query",
-    )
-    both = confidence_aware_bimhm_logits(
-        similarity,
-        rho,
-        base,
-        alpha=10.0,
-        penalty_weight=0.10,
-        eps=0.05,
-        direction="both",
-    )
-
-    expected_penalty = 0.10 * torch.log(torch.tensor(0.50))
-    assert both["q_to_s_delta"].item() == pytest.approx(
-        expected_penalty.item() / 2.0,
-        abs=1e-6,
-    )
-    assert both["s_to_q_delta"].item() == pytest.approx(
-        expected_penalty.item(),
-        abs=1e-6,
-    )
-    assert both["logits"].item() == pytest.approx(
-        base.item() + 0.75 * expected_penalty.item(),
-        abs=1e-6,
-    )
-    assert both["logits"].item() < support_only["logits"].item()
 
 
 def test_patch_and_unmatched_mass_change_bimhm_before_frame_max():
     similarity = torch.tensor([[[[0.90], [0.80]]]])
-    rho = torch.ones(1, 1, 2)
     base = torch.tensor([[8.75]])
-    result = confidence_aware_bimhm_logits(
+    result = hypothesis_mass_bimhm_logits(
         similarity,
-        rho,
+        torch.tensor([[[0.0, 1.0]]]),
         base,
         alpha=10.0,
-        penalty_weight=0.0,
-        direction="both",
-        frame_transport_mass=torch.tensor([[[0.0, 1.0]]]),
         transport_strength=1.0,
         unmatched_cost=0.0,
     )
@@ -287,14 +260,11 @@ def test_patch_and_unmatched_mass_change_bimhm_before_frame_max():
 
 def test_one_sided_unmatched_mass_never_rewards_negative_similarity():
     similarity = torch.tensor([[[[-0.5]]]])
-    result = confidence_aware_bimhm_logits(
+    result = hypothesis_mass_bimhm_logits(
         similarity,
-        torch.ones(1, 1, 1),
+        torch.zeros(1, 1, 1),
         torch.tensor([[-5.0]]),
         alpha=10.0,
-        penalty_weight=0.0,
-        direction="both",
-        frame_transport_mass=torch.zeros(1, 1, 1),
         unmatched_cost=0.0,
         one_sided_transport=True,
     )
@@ -407,7 +377,6 @@ def test_wrapper_preserves_explicit_patch_plus_unmatched_mass():
         EVIDENCE_VERIFICATION_ENABLE=False,
         ABSOLUTE_MASS_ENABLE=True,
         LOG_PENALTY_WEIGHT=0.0,
-        FRAME_LOG_PENALTY_WEIGHT=0.0,
     )
     model.cfg = SimpleNamespace(
         FEW_SHOT=SimpleNamespace(QUERY_CLASS_MATCHABILITY=cfg),
@@ -479,6 +448,66 @@ def test_wrapper_preserves_explicit_patch_plus_unmatched_mass():
     result["query_partial_q2s_logits"].sum().backward()
     assert post.grad is not None
     assert torch.isfinite(post.grad).all()
+
+
+def test_wrapper_uses_only_target_state_mass_in_bimhm():
+    model = _pointformer(tau=1.0)
+    cfg = _evidence_cfg(
+        ABSOLUTE_MASS_ENABLE=True,
+        ABSOLUTE_MASS_PATCH_TOPK=1,
+        ABSOLUTE_MASS_SUPPORT_TOPK_FRAMES=1,
+        ABSOLUTE_MASS_CALIBRATION_BETA=0.50,
+    )
+    model.cfg = SimpleNamespace(
+        FEW_SHOT=SimpleNamespace(QUERY_CLASS_MATCHABILITY=cfg),
+        POINT_INFO=SimpleNamespace(USE_PT_QUERY_MASK=True),
+    )
+    model.pot_route_cfg = SimpleNamespace(
+        FRAME_SOFTMAX_TAU=1.0,
+        QUERY_PARTIAL_LOGIT_ALPHA=10.0,
+        QUERY_PARTIAL_LOGIT_BIAS=-2.0,
+    )
+    model.use_query_null_route = False
+    model.use_cat_cost_aggregation = False
+    model.use_support_text_fusion = False
+    model._get_pot_label_text_features = (
+        lambda class_ids, dtype: torch.eye(2, dtype=dtype)
+    )
+    values = torch.tensor(
+        [
+            [[[1.0, 0.0]]],
+            [[[0.0, 1.0]]],
+            [[[0.8, 0.2]]],
+        ],
+        requires_grad=True,
+    )
+    mask = torch.ones(3, 1, 1, dtype=torch.bool)
+    metadata = {
+        "support_mask": torch.tensor([True, True, False]),
+        "pred_query_mask": mask,
+        "pred_visibility": mask,
+        "episode_class_ids": torch.tensor([0, 1]),
+        "episode_positive_labels": torch.tensor(
+            [[1, 0], [0, 1], [1, 0]],
+            dtype=torch.bool,
+        ),
+    }
+    result = model._build_frame_softmax_q2s_aux(
+        values,
+        metadata,
+        matchability_evidence_tokens=values.detach(),
+    )
+
+    target = result["query_frame_target_mass"]
+    confuser = result["query_frame_confuser_mass"]
+    null = result["query_frame_null_mass"]
+    expected = (
+        result["query_frame_absolute_patch_mass"]
+        * result["query_frame_matchability"]
+    )
+    assert torch.allclose(target, expected)
+    assert torch.allclose(result["query_frame_patch_mass"], target)
+    assert torch.allclose(target + confuser + null, torch.ones_like(target))
 
 
 def test_evidence_and_local_refinement_are_mutually_exclusive():
