@@ -415,6 +415,7 @@ def build_class_confuser_prototypes(
     episode_positive_labels: torch.Tensor,
     query_label_features: torch.Tensor,
     detach_support: bool = False,
+    temporal_point_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build per-Support, per-class confuser prototypes.
 
@@ -477,6 +478,9 @@ def build_class_confuser_prototypes(
             value_tokens[sample_idx],
             point_mask[sample_idx],
             query_label_features,
+            **({} if temporal_point_mask is None else {
+                "temporal_point_mask": temporal_point_mask[sample_idx],
+            }),
         )
         if detach_support:
             sample_proto = sample_proto.detach()
@@ -505,6 +509,7 @@ def build_class_local_support_references(
     support_mask: torch.Tensor,
     episode_positive_labels: torch.Tensor,
     query_label_features: torch.Tensor,
+    temporal_point_mask: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build one routed reference for every Support/class pair.
 
@@ -591,6 +596,9 @@ def build_class_local_support_references(
             value_tokens[sample_idx],
             route_point_mask[sample_idx],
             query_label_features,
+            **({} if temporal_point_mask is None else {
+                "temporal_point_mask": temporal_point_mask[sample_idx],
+            }),
         )
         sample_proto = torch.nan_to_num(
             sample_proto,
@@ -1643,6 +1651,9 @@ def _build_frame_softmax_q2s_with_matchability(
         if self.cfg.POINT_INFO.USE_PT_QUERY_MASK
         else metadata["pred_visibility"]
     ).to(device=value_tokens.device).bool()
+    # Only the new temporal router consumes this mask. Spatial routing and
+    # all quality/specificity masks and formulas below remain unchanged.
+    temporal_point_mask = self._get_temporal_similarity_mask(point_mask, metadata)
     episode_positive_labels = metadata["episode_positive_labels"].to(
         device=value_tokens.device,
     ).bool()
@@ -1704,6 +1715,7 @@ def _build_frame_softmax_q2s_with_matchability(
         episode_positive_labels,
         episode_label_text,
         precomputed_similarity=refined_similarity,
+        temporal_point_mask=temporal_point_mask,
     )
 
     # The existing text+Support feature remains responsible for ``where``.
@@ -1820,6 +1832,7 @@ def _build_frame_softmax_q2s_with_matchability(
             support_mask,
             episode_positive_labels,
             query_label_features,
+            temporal_point_mask=temporal_point_mask,
         )
         (
             local_margin,
@@ -1928,6 +1941,9 @@ def _build_frame_softmax_q2s_with_matchability(
                         value_tokens[sample_idx],
                         point_mask[sample_idx],
                         query_label_features,
+                        **({} if temporal_point_mask is None else {
+                            "temporal_point_mask": temporal_point_mask[sample_idx],
+                        }),
                     )
                 )
             else:
@@ -2132,6 +2148,7 @@ def _build_frame_softmax_q2s_with_matchability(
                     detach_support=bool(
                         _cfg_value(cfg, "DETACH_CONFUSER_SUPPORT", False)
                     ),
+                    temporal_point_mask=temporal_point_mask,
                 )
             )
         else:

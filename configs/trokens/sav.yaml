@@ -39,6 +39,14 @@ FEW_SHOT:
   POT_ROUTE:
     ENABLE: True
     FRAME_SOFTMAX_TAU: 0.04
+    TEMPORAL_REFINEMENT:
+      ENABLE: True
+      HIDDEN_DIM: 16
+      KERNEL_SIZE: 3
+      # Bounded cosine residual; initially <= 0.05*tanh(0.1) ~= 0.005.
+      MAX_DELTA: 0.05
+      GATE_INIT: 0.1
+      USE_VISIBILITY: True
     QUERY_PARTIAL_ENABLE: True
     QUERY_PARTIAL_LOGIT_ALPHA: 10.0
     QUERY_PARTIAL_LOGIT_BIAS: -2.0

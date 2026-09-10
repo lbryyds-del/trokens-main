@@ -14,6 +14,9 @@ from torch.nn.init import trunc_normal_
 
 from trokens.models.attention import TrajectoryAttentionBlock
 from trokens.models.cat_spatial_aggregation import CATSpatialCostAggregator
+from trokens.models.temporal_similarity_refiner import (
+    TrajectoryTemporalSimilarityRefiner,
+)
 from trokens.models.branches.motion_blocks import (
     CrossMotionModule,
     HODMotionModule
@@ -453,6 +456,48 @@ class Pointformer(nn.Module):
                 in_feature_dim=feat_dim,
                 out_feature_dim=self.embed_dim,
                 num_patches=self.num_patches,
+            )
+
+        # Build last so the optional branch cannot change initialization of
+        # existing parameters or be overwritten by the global weight init.
+        self._init_temporal_similarity_refinement()
+
+    def _init_temporal_similarity_refinement(self):
+        temporal_cfg = getattr(self.pot_route_cfg, "TEMPORAL_REFINEMENT", None)
+        self.use_temporal_similarity_refinement = bool(
+            getattr(temporal_cfg, "ENABLE", False)
+        )
+        self.temporal_similarity_refiner = None
+        if not self.use_temporal_similarity_refinement:
+            return
+        if not self.use_frame_softmax_route or not self.use_query_partial_q2s:
+            raise ValueError(
+                "TEMPORAL_REFINEMENT requires the frame-softmax Query route."
+            )
+        match_cfg = getattr(self.cfg.FEW_SHOT, "QUERY_CLASS_MATCHABILITY", None)
+        if (
+            self.use_cat_cost_aggregation
+            or self.use_query_null_route
+            or (
+                bool(getattr(match_cfg, "ENABLE", False))
+                and bool(getattr(match_cfg, "LOCAL_REFINEMENT_ENABLE", False))
+            )
+        ):
+            raise ValueError(
+                "TEMPORAL_REFINEMENT cannot be combined with COST_AGG, "
+                "QUERY_NULL_ROUTE or local confuser refinement: these bypass "
+                "the shared text-similarity route."
+            )
+        if not self.cfg.POINT_INFO.ENABLE:
+            raise ValueError("TEMPORAL_REFINEMENT requires tracked point inputs.")
+        # Preserve the baseline RNG stream for subsequent episodic sampling.
+        with torch.random.fork_rng(devices=[]):
+            self.temporal_similarity_refiner = TrajectoryTemporalSimilarityRefiner(
+                hidden_dim=getattr(temporal_cfg, "HIDDEN_DIM", 16),
+                kernel_size=getattr(temporal_cfg, "KERNEL_SIZE", 3),
+                max_delta=getattr(temporal_cfg, "MAX_DELTA", 0.05),
+                gate_init=getattr(temporal_cfg, "GATE_INIT", 0.1),
+                use_visibility=getattr(temporal_cfg, "USE_VISIBILITY", True),
             )
 
     def hook_fn(self, feat_dict, layer_name):
@@ -1105,11 +1150,31 @@ class Pointformer(nn.Module):
             neginf=-1.0,
         ).clamp(-1.0, 1.0)
 
+    def _get_temporal_similarity_mask(self, point_mask, metadata):
+        """Keep temporal observation validity separate from spatial routing."""
+        if not bool(getattr(self, "use_temporal_similarity_refinement", False)):
+            return None
+        visibility = metadata.get("pred_visibility")
+        if visibility is None or tuple(visibility.shape) != tuple(point_mask.shape):
+            raise ValueError(
+                "TEMPORAL_REFINEMENT requires pred_visibility matching point_mask."
+            )
+        return point_mask.bool() & visibility.to(device=point_mask.device).bool()
+
+    def _refine_trajectory_similarity(self, similarity, point_mask):
+        if not bool(getattr(self, "use_temporal_similarity_refinement", False)):
+            return similarity
+        refiner = getattr(self, "temporal_similarity_refiner", None)
+        if refiner is None:
+            return similarity
+        return refiner(similarity, point_mask)
+
     def _compute_frame_softmax_text_prototypes(
         self,
         patch_tokens,
         point_mask,
         label_text_features,
+        temporal_point_mask=None,
     ):
         """Build per-text frame prototypes with patch-wise masked softmax."""
         label_text_features = torch.nan_to_num(
@@ -1128,6 +1193,10 @@ class Pointformer(nn.Module):
             posinf=1.0,
             neginf=-1.0,
         ).clamp(-1.0, 1.0)
+        similarity = self._refine_trajectory_similarity(
+            similarity,
+            point_mask if temporal_point_mask is None else temporal_point_mask,
+        )
         return self._compute_frame_softmax_prototypes_from_similarity(
             patch_tokens,
             point_mask,
@@ -1450,6 +1519,7 @@ class Pointformer(nn.Module):
         episode_positive_labels,
         episode_label_text,
         precomputed_similarity=None,
+        temporal_point_mask=None,
     ):
         """Average true-label text-routed support prototypes by episode class."""
         support_mask = support_mask.to(device=value_tokens.device).bool()
@@ -1476,6 +1546,9 @@ class Pointformer(nn.Module):
                     value_tokens[sample_idx],
                     point_mask[sample_idx],
                     positive_text,
+                    **({} if temporal_point_mask is None else {
+                        "temporal_point_mask": temporal_point_mask[sample_idx],
+                    }),
                 )
             else:
                 sample_similarity = precomputed_similarity[sample_idx].index_select(
@@ -2062,6 +2135,7 @@ class Pointformer(nn.Module):
             if self.cfg.POINT_INFO.USE_PT_QUERY_MASK
             else metadata["pred_visibility"]
         ).to(device=value_tokens.device).bool()
+        temporal_point_mask = self._get_temporal_similarity_mask(point_mask, metadata)
         episode_positive_labels = metadata["episode_positive_labels"].to(
             device=value_tokens.device,
         ).bool()
@@ -2099,6 +2173,7 @@ class Pointformer(nn.Module):
             episode_positive_labels,
             episode_label_text,
             precomputed_similarity=refined_similarity,
+            temporal_point_mask=temporal_point_mask,
         )
         query_label_features = episode_label_text
         support_visual = None
@@ -2151,6 +2226,9 @@ class Pointformer(nn.Module):
                     value_tokens[sample_idx],
                     point_mask[sample_idx],
                     query_label_features,
+                    **({} if temporal_point_mask is None else {
+                        "temporal_point_mask": temporal_point_mask[sample_idx],
+                    }),
                 )
             else:
                 sample_prototypes, _ = (
