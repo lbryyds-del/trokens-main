@@ -37,12 +37,27 @@ def construct_optimizer(model, cfg):
     orvit_zero_parameters = []
     orvit_no_grad_parameters = []
     extra_encoder_parameters = []
+    temporal_parameters = []
+    temporal_zero_parameters = []
+
+    temporal_cfg = getattr(
+        getattr(getattr(cfg, "FEW_SHOT", None), "POT_ROUTE", None),
+        "TEMPORAL_REFINEMENT",
+        None,
+    )
+    temporal_weight_decay = float(getattr(temporal_cfg, "WEIGHT_DECAY", 0.01))
 
     skip = {}
     if hasattr(model, "no_weight_decay"):
         skip = model.no_weight_decay()
 
     for name, p in model.named_parameters():
+        if "temporal_similarity_refiner" in name and p.requires_grad:
+            if name.endswith(".bias"):
+                temporal_zero_parameters.append(p)
+            else:
+                temporal_parameters.append(p)
+            continue
         is_bn = isinstance(p, torch.nn.modules.batchnorm._NormBase)
 
         if not p.requires_grad:
@@ -62,6 +77,8 @@ def construct_optimizer(model, cfg):
     optim_params = [
         {"params": non_bn_parameters + orvit_non_bn_parameters, "weight_decay": cfg.SOLVER.WEIGHT_DECAY},
         {"params": zero_parameters + orvit_zero_parameters, "weight_decay": 0.0},
+        {"params": temporal_parameters, "weight_decay": temporal_weight_decay},
+        {"params": temporal_zero_parameters, "weight_decay": 0.0},
         {"params": extra_encoder_parameters, "lr": cfg.SOLVER.EXTRA_ENCODER_LR, 'extra_encoder': True},
     ]
 
@@ -77,7 +94,9 @@ def construct_optimizer(model, cfg):
         len(orvit_bn_parameters),
         len(orvit_zero_parameters),
         len(orvit_no_grad_parameters),
-        len(extra_encoder_parameters)]), "parameter size does not match: {} + {} + {} + {} != {}".format(
+        len(extra_encoder_parameters),
+        len(temporal_parameters),
+        len(temporal_zero_parameters)]), "parameter size does not match: {} + {} + {} + {} != {}".format(
         len(non_bn_parameters),
         len(bn_parameters),
         len(zero_parameters),

@@ -453,7 +453,6 @@ def train_epoch(
         # Update the parameters.
         scaler.step(optimizer)
         scaler.update()
-
         top1_err, top5_err = None, None
         classification_loss = loss_dict['classfication_loss']
         q2s_loss = loss_dict['q2s_loss']
@@ -1008,6 +1007,10 @@ def train_few_shot(cfg, args, wandb_run=None):
     epoch_timer = EpochTimer()
     best_val_acc = 0
     for cur_epoch in range(start_epoch, cfg.SOLVER.MAX_EPOCH):
+
+        # Keep per-rank episode counts fixed while changing training episodes.
+        if hasattr(train_loader.batch_sampler, "set_epoch"):
+            train_loader.batch_sampler.set_epoch(cur_epoch)
 
         # Train for one epoch.
         epoch_timer.epoch_tic()

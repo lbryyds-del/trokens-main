@@ -495,8 +495,8 @@ class Pointformer(nn.Module):
             self.temporal_similarity_refiner = TrajectoryTemporalSimilarityRefiner(
                 hidden_dim=getattr(temporal_cfg, "HIDDEN_DIM", 16),
                 kernel_size=getattr(temporal_cfg, "KERNEL_SIZE", 3),
-                max_delta=getattr(temporal_cfg, "MAX_DELTA", 0.05),
-                gate_init=getattr(temporal_cfg, "GATE_INIT", 0.1),
+                long_dilation=getattr(temporal_cfg, "LONG_DILATION", 2),
+                max_logit_delta=getattr(temporal_cfg, "MAX_LOGIT_DELTA", 0.5),
                 use_visibility=getattr(temporal_cfg, "USE_VISIBILITY", True),
             )
 
@@ -1161,13 +1161,19 @@ class Pointformer(nn.Module):
             )
         return point_mask.bool() & visibility.to(device=point_mask.device).bool()
 
-    def _refine_trajectory_similarity(self, similarity, point_mask):
+    def _refine_trajectory_similarity(self, similarity, point_mask, softmax_tau=None):
         if not bool(getattr(self, "use_temporal_similarity_refinement", False)):
             return similarity
         refiner = getattr(self, "temporal_similarity_refiner", None)
         if refiner is None:
             return similarity
-        return refiner(similarity, point_mask)
+        if softmax_tau is None:
+            softmax_tau = getattr(self.pot_route_cfg, "FRAME_SOFTMAX_TAU", 0.07)
+        tau = max(float(softmax_tau), 1e-6)
+        # The refiner returns a bounded logit residual; convert it to the
+        # similarity units consumed by the canonical spatial-softmax builder.
+        delta_logits = refiner(similarity, point_mask)
+        return similarity.float() + tau * delta_logits.float()
 
     def _compute_frame_softmax_text_prototypes(
         self,
@@ -1193,14 +1199,122 @@ class Pointformer(nn.Module):
             posinf=1.0,
             neginf=-1.0,
         ).clamp(-1.0, 1.0)
+        tau = max(float(getattr(self.pot_route_cfg, "FRAME_SOFTMAX_TAU", 0.07)), 1e-6)
         similarity = self._refine_trajectory_similarity(
             similarity,
             point_mask if temporal_point_mask is None else temporal_point_mask,
+            softmax_tau=tau,
         )
         return self._compute_frame_softmax_prototypes_from_similarity(
             patch_tokens,
             point_mask,
             similarity,
+            softmax_tau=tau,
+        )
+
+    def _compute_batched_frame_softmax_text_prototypes(
+        self,
+        patch_tokens,
+        point_mask,
+        label_text_features,
+        temporal_point_mask=None,
+    ):
+        """Batched equivalent of the canonical text-routed prototype path."""
+        similarity = self._compute_batched_point_text_similarity(
+            patch_tokens,
+            label_text_features,
+        )
+        tau = max(
+            float(getattr(self.pot_route_cfg, "FRAME_SOFTMAX_TAU", 0.07)),
+            1e-6,
+        )
+        similarity = self._refine_trajectory_similarity(
+            similarity,
+            point_mask if temporal_point_mask is None else temporal_point_mask,
+            softmax_tau=tau,
+        )
+        return self._compute_batched_frame_softmax_prototypes_from_similarity(
+            patch_tokens,
+            point_mask,
+            similarity,
+            softmax_tau=tau,
+        )
+
+    def _compute_batched_frame_softmax_prototypes_from_similarity(
+        self,
+        patch_tokens,
+        point_mask,
+        similarity,
+        softmax_tau=None,
+    ):
+        """Build ``[B,K,T,D]`` prototypes without per-sample/class loops."""
+        if patch_tokens.ndim != 4 or similarity.ndim != 4:
+            raise ValueError(
+                "Batched frame-softmax expects [B,T,N,D] tokens and "
+                "[B,K,T,N] similarity."
+            )
+        batch, temporal_dim, num_points, _ = patch_tokens.shape
+        if tuple(point_mask.shape) != (batch, temporal_dim, num_points):
+            raise ValueError("point_mask must match patch tokens [B,T,N].")
+        if (
+            similarity.shape[0] != batch
+            or tuple(similarity.shape[2:]) != (temporal_dim, num_points)
+        ):
+            raise ValueError(
+                "Batched similarity must match patch tokens [B,K,T,N]."
+            )
+
+        patch_tokens = torch.nan_to_num(
+            patch_tokens, nan=0.0, posinf=0.0, neginf=0.0,
+        )
+        point_mask = point_mask.to(device=patch_tokens.device).bool()
+        similarity = torch.nan_to_num(
+            similarity.to(device=patch_tokens.device).float(),
+            nan=0.0,
+            posinf=1e4,
+            neginf=-1e4,
+        )
+        if softmax_tau is None:
+            softmax_tau = getattr(
+                self.pot_route_cfg,
+                "FRAME_SOFTMAX_TAU",
+                0.07,
+            )
+        patch_weights = self._masked_softmax_1d(
+            similarity,
+            point_mask.unsqueeze(1),
+            dim=-1,
+            tau=max(float(softmax_tau), 1e-6),
+        ).to(dtype=patch_tokens.dtype)
+
+        frame_weights = patch_weights * point_mask.unsqueeze(1).to(
+            patch_weights.dtype,
+        )
+        weighted_denom = frame_weights.sum(dim=-1, keepdim=True)
+        weighted_proto = torch.einsum(
+            "bktn,btnd->bktd",
+            frame_weights,
+            patch_tokens,
+        ) / weighted_denom.clamp_min(1e-6)
+
+        valid_weights = point_mask.to(patch_tokens.dtype)
+        valid_proto = torch.einsum(
+            "btn,btnd->btd",
+            valid_weights,
+            patch_tokens,
+        ) / valid_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        prototypes = torch.where(
+            weighted_denom > 0.0,
+            weighted_proto,
+            valid_proto.unsqueeze(1),
+        )
+        return (
+            torch.nan_to_num(
+                prototypes, nan=0.0, posinf=0.0, neginf=0.0,
+            ),
+            torch.nan_to_num(
+                patch_weights, nan=0.0, posinf=0.0, neginf=0.0,
+            ),
         )
 
     def _compute_frame_softmax_prototypes_from_similarity(
@@ -1530,38 +1644,46 @@ class Pointformer(nn.Module):
         num_labels = episode_label_text.shape[0]
         temporal_dim = value_tokens.shape[1]
         feat_dim = value_tokens.shape[-1]
-        per_class_prototypes = [[] for _ in range(num_labels)]
-
         support_indices = torch.nonzero(support_mask, as_tuple=False).flatten()
-        for sample_idx in support_indices.tolist():
+        if support_indices.numel() == 0:
+            return value_tokens.new_zeros(num_labels, temporal_dim, feat_dim)
+
+        support_tokens = value_tokens.index_select(0, support_indices)
+        support_points = point_mask.index_select(0, support_indices)
+        if precomputed_similarity is None:
+            support_temporal_points = (
+                None
+                if temporal_point_mask is None
+                else temporal_point_mask.index_select(0, support_indices)
+            )
+            all_support_prototypes, _ = (
+                self._compute_batched_frame_softmax_text_prototypes(
+                    support_tokens,
+                    support_points,
+                    episode_label_text,
+                    temporal_point_mask=support_temporal_points,
+                )
+            )
+        else:
+            all_support_prototypes, _ = (
+                self._compute_batched_frame_softmax_prototypes_from_similarity(
+                    support_tokens,
+                    support_points,
+                    precomputed_similarity.index_select(0, support_indices),
+                )
+            )
+
+        per_class_prototypes = [[] for _ in range(num_labels)]
+        for support_local_idx, sample_idx in enumerate(support_indices.tolist()):
             positive_indices = torch.nonzero(
                 episode_positive_labels[sample_idx],
                 as_tuple=False,
             ).flatten()
             if positive_indices.numel() == 0:
                 continue
-            if precomputed_similarity is None:
-                positive_text = episode_label_text.index_select(0, positive_indices)
-                sample_prototypes, _ = self._compute_frame_softmax_text_prototypes(
-                    value_tokens[sample_idx],
-                    point_mask[sample_idx],
-                    positive_text,
-                    **({} if temporal_point_mask is None else {
-                        "temporal_point_mask": temporal_point_mask[sample_idx],
-                    }),
-                )
-            else:
-                sample_similarity = precomputed_similarity[sample_idx].index_select(
-                    0,
-                    positive_indices,
-                )
-                sample_prototypes, _ = (
-                    self._compute_frame_softmax_prototypes_from_similarity(
-                        value_tokens[sample_idx],
-                        point_mask[sample_idx],
-                        sample_similarity,
-                    )
-                )
+            sample_prototypes = all_support_prototypes[
+                support_local_idx
+            ].index_select(0, positive_indices)
             for local_idx, class_idx in enumerate(positive_indices.tolist()):
                 per_class_prototypes[class_idx].append(sample_prototypes[local_idx])
 
@@ -2193,10 +2315,10 @@ class Pointformer(nn.Module):
             )
 
         query_indices = torch.nonzero(query_mask, as_tuple=False).flatten()
-        query_prototypes = []
         query_null_weights = []
-        for sample_idx in query_indices.tolist():
-            if bool(getattr(self, "use_query_null_route", False)):
+        if bool(getattr(self, "use_query_null_route", False)):
+            query_prototypes = []
+            for sample_idx in query_indices.tolist():
                 if refined_similarity is None:
                     (
                         sample_prototypes,
@@ -2221,27 +2343,35 @@ class Pointformer(nn.Module):
                         )
                     )
                 query_null_weights.append(sample_null_weights.unsqueeze(0))
-            elif refined_similarity is None:
-                sample_prototypes, _ = self._compute_frame_softmax_text_prototypes(
-                    value_tokens[sample_idx],
-                    point_mask[sample_idx],
-                    query_label_features,
-                    **({} if temporal_point_mask is None else {
-                        "temporal_point_mask": temporal_point_mask[sample_idx],
-                    }),
+                query_prototypes.append(sample_prototypes.unsqueeze(0))
+            if not query_prototypes:
+                return None
+            query_prototypes = torch.cat(query_prototypes, dim=0)
+        else:
+            query_tokens = value_tokens.index_select(0, query_indices)
+            query_points = point_mask.index_select(0, query_indices)
+            if refined_similarity is None:
+                query_temporal_points = (
+                    None
+                    if temporal_point_mask is None
+                    else temporal_point_mask.index_select(0, query_indices)
                 )
-            else:
-                sample_prototypes, _ = (
-                    self._compute_frame_softmax_prototypes_from_similarity(
-                        value_tokens[sample_idx],
-                        point_mask[sample_idx],
-                        refined_similarity[sample_idx],
+                query_prototypes, _ = (
+                    self._compute_batched_frame_softmax_text_prototypes(
+                        query_tokens,
+                        query_points,
+                        query_label_features,
+                        temporal_point_mask=query_temporal_points,
                     )
                 )
-            query_prototypes.append(sample_prototypes.unsqueeze(0))
-        if not query_prototypes:
-            return None
-        query_prototypes = torch.cat(query_prototypes, dim=0)
+            else:
+                query_prototypes, _ = (
+                    self._compute_batched_frame_softmax_prototypes_from_similarity(
+                        query_tokens,
+                        query_points,
+                        refined_similarity.index_select(0, query_indices),
+                    )
+                )
 
         diag_similarity = self._compute_bidirectional_frame_similarity(
             query_prototypes,

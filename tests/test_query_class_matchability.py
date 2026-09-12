@@ -53,7 +53,7 @@ def test_config_enables_matchability_and_disables_learned_null():
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_SOURCE == "post"
     assert (
         cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.MODE
-        == "positive_confuser_margin"
+        == "threshold"
     )
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_REFINEMENT_ENABLE is False
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_LOGIT_STRENGTH == 0.50
@@ -64,7 +64,7 @@ def test_config_enables_matchability_and_disables_learned_null():
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DUAL_LOGIT_LOSS_ENABLE is True
     assert (
         cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_VERIFICATION_ENABLE
-        is True
+        is False
     )
     assert not hasattr(
         cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY,
@@ -73,8 +73,8 @@ def test_config_enables_matchability_and_disables_learned_null():
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_USE_VISIBILITY is True
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_VIDEO_TOPK_FRAMES == 3
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_MIL_TEMPERATURE == 0.10
-    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_MIL_LOSS_WEIGHT == 0.10
-    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_ENABLE is True
+    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_MIL_LOSS_WEIGHT == 0.0
+    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_ENABLE is False
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_SOURCE == "raw"
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_PATCH_TOPK == 8
     assert (

@@ -17,6 +17,7 @@ class FewShotEpisodeSampler(Sampler):
         self.rank = du.get_rank()
         self.world_size = max(du.get_world_size(), 1)
         self.base_seed = int(cfg.RNG_SEED)
+        self.epoch = 0
         self.multi_label = cfg.DATA.MULTI_LABEL and hasattr(dataset, "_atomic_labels")
         labels = dataset._labels
         if self.multi_label:
@@ -137,9 +138,17 @@ class FewShotEpisodeSampler(Sampler):
             episode_ids.extend(episode_ids[:pad])
         return episode_ids[self.rank::self.world_size]
 
+    def set_epoch(self, epoch):
+        """Change training episodes without changing validation/test episodes."""
+        self.epoch = int(epoch)
+
     def __iter__(self):
         for global_episode_idx in self.local_episode_ids:
-            rng = random.Random(self.base_seed + global_episode_idx)
+            epoch_offset = (
+                self.epoch * self.cfg.FEW_SHOT.TRAIN_EPISODES
+                if self.mode == "train" else 0
+            )
+            rng = random.Random(self.base_seed + epoch_offset + global_episode_idx)
             selected_classes = rng.sample(self.class_ids, self.num_way)
 
             batch_indices = []

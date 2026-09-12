@@ -199,20 +199,29 @@ def test_frame_softmax_fusion_conditions_query_only_and_ignores_query_targets():
     }
 
     routed_text = []
-    original_compute = model._compute_frame_softmax_text_prototypes
+    original_compute = model._compute_batched_frame_softmax_text_prototypes
 
-    def record_routed_text(patch_tokens, sample_mask, label_text_features):
+    def record_routed_text(
+        patch_tokens,
+        sample_mask,
+        label_text_features,
+        temporal_point_mask=None,
+    ):
         routed_text.append(label_text_features.detach().clone())
-        return original_compute(patch_tokens, sample_mask, label_text_features)
+        return original_compute(
+            patch_tokens,
+            sample_mask,
+            label_text_features,
+            temporal_point_mask=temporal_point_mask,
+        )
 
-    model._compute_frame_softmax_text_prototypes = record_routed_text
+    model._compute_batched_frame_softmax_text_prototypes = record_routed_text
     first = model._build_frame_softmax_q2s_aux(value_tokens, metadata)
 
-    assert len(routed_text) == 3
-    assert torch.equal(routed_text[0], episode_text[[0]])
-    assert torch.equal(routed_text[1], episode_text[[1]])
+    assert len(routed_text) == 2
+    assert torch.equal(routed_text[0], episode_text)
     assert torch.allclose(
-        routed_text[2],
+        routed_text[1],
         first["support_text_fusion_query_features"],
     )
     expected_fused = torch.full((2, 2), 2 ** -0.5)

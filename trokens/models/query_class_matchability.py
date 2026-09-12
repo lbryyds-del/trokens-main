@@ -1932,34 +1932,28 @@ def _build_frame_softmax_q2s_with_matchability(
         base_query_prototypes = local_refinement["base_prototypes"]
         query_patch_weights = local_refinement["refined_weights"]
     else:
-        query_prototypes = []
-        query_patch_weights = []
-        for sample_idx in query_indices.tolist():
-            if refined_similarity is None:
-                sample_prototypes, sample_patch_weights = (
-                    self._compute_frame_softmax_text_prototypes(
-                        value_tokens[sample_idx],
-                        point_mask[sample_idx],
-                        query_label_features,
-                        **({} if temporal_point_mask is None else {
-                            "temporal_point_mask": temporal_point_mask[sample_idx],
-                        }),
-                    )
+        if refined_similarity is None:
+            query_temporal_point_mask = (
+                None
+                if temporal_point_mask is None
+                else temporal_point_mask.index_select(0, query_indices)
+            )
+            query_prototypes, query_patch_weights = (
+                self._compute_batched_frame_softmax_text_prototypes(
+                    query_tokens,
+                    query_point_mask,
+                    query_label_features,
+                    temporal_point_mask=query_temporal_point_mask,
                 )
-            else:
-                sample_prototypes, sample_patch_weights = (
-                    self._compute_frame_softmax_prototypes_from_similarity(
-                        value_tokens[sample_idx],
-                        point_mask[sample_idx],
-                        refined_similarity[sample_idx],
-                    )
+            )
+        else:
+            query_prototypes, query_patch_weights = (
+                self._compute_batched_frame_softmax_prototypes_from_similarity(
+                    query_tokens,
+                    query_point_mask,
+                    refined_similarity.index_select(0, query_indices),
                 )
-            query_prototypes.append(sample_prototypes.unsqueeze(0))
-            query_patch_weights.append(sample_patch_weights.unsqueeze(0))
-        if not query_prototypes:
-            return None
-        query_prototypes = torch.cat(query_prototypes, dim=0)
-        query_patch_weights = torch.cat(query_patch_weights, dim=0)
+            )
         base_query_prototypes = query_prototypes
 
     diag_similarity = self._compute_bidirectional_frame_similarity(

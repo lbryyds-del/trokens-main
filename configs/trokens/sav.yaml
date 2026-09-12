@@ -41,11 +41,13 @@ FEW_SHOT:
     FRAME_SOFTMAX_TAU: 0.04
     TEMPORAL_REFINEMENT:
       ENABLE: True
+      TYPE: lite_tcn_3ch_v1
       HIDDEN_DIM: 16
       KERNEL_SIZE: 3
-      # Bounded cosine residual; initially <= 0.05*tanh(0.1) ~= 0.005.
-      MAX_DELTA: 0.05
-      GATE_INIT: 0.1
+      LONG_DILATION: 2
+      # Fixed bound in spatial-softmax logit units.
+      MAX_LOGIT_DELTA: 0.5
+      WEIGHT_DECAY: 0.01
       USE_VISIBILITY: True
     QUERY_PARTIAL_ENABLE: True
     QUERY_PARTIAL_LOGIT_ALPHA: 10.0
@@ -64,7 +66,9 @@ FEW_SHOT:
     ORTHO_DETACH_SUPPORT: True
   QUERY_CLASS_MATCHABILITY:
     ENABLE: True
-    MODE: "positive_confuser_margin"
+    # Disable Query uniqueness (Positive-vs-Confuser relative margin).
+    # Keep the base Query class-decoupled frame-softmax route enabled.
+    MODE: "threshold"
     # Legacy threshold-mode evidence (kept for R1 rollback/comparison).
     TOPK_PATCHES: 8
     TOPK_FRAMES: 3
@@ -94,7 +98,8 @@ FEW_SHOT:
     # Frame specificity verifies the same class-conditioned post-Pointformer
     # patch distribution pi that constructs Q_k. No second text-patch route is
     # built for specificity.
-    EVIDENCE_VERIFICATION_ENABLE: True
+    # Disable the frame-level specificity/evidence verification branch.
+    EVIDENCE_VERIFICATION_ENABLE: False
     EVIDENCE_USE_VISIBILITY: True
     EVIDENCE_POSITIVE_AGGREGATION: "topk_mean"
     EVIDENCE_POSITIVE_TOPK: 2
@@ -109,11 +114,13 @@ FEW_SHOT:
     # Weak video-label supervision over the strongest Evidence margins.
     EVIDENCE_VIDEO_TOPK_FRAMES: 3
     EVIDENCE_MIL_TEMPERATURE: 0.10
-    EVIDENCE_MIL_LOSS_WEIGHT: 0.10
+    # No Evidence-MIL objective while the frame verifier is disabled.
+    EVIDENCE_MIL_LOSS_WEIGHT: 0.0
     # Pure-text Raw evidence supplies absolute non-null mass m. Together with
     # frame specificity rho, the single transported target mass is g=m*rho;
     # the rejected confuser/null mass remains outside both BiMHM directions.
-    ABSOLUTE_MASS_ENABLE: True
+    # Disable the absolute quality/mass branch.
+    ABSOLUTE_MASS_ENABLE: False
     ABSOLUTE_MASS_SOURCE: "raw"
     ABSOLUTE_MASS_USE_VISIBILITY: True
     ABSOLUTE_MASS_PATCH_TOPK: 8
@@ -192,7 +199,9 @@ AUG:
 
 SOLVER:
   BASE_LR: 0.0001
-  LR_POLICY: steps_with_relative_lrs
+  LR_POLICY: cosine
+  COSINE_AFTER_WARMUP: True
+  COSINE_END_LR: 0.000001
   LRS: [1, 0.1, 0.01]
   STEPS: [0, 20, 40]
   MAX_EPOCH: 20

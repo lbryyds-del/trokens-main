@@ -1,4 +1,4 @@
-"""Temporal routing, legacy identity and SAV quality/specificity boundaries."""
+"""Three-channel temporal residual routing and deterministic fast path."""
 
 from pathlib import Path
 
@@ -20,14 +20,13 @@ def _sav_cfg():
     return cfg
 
 
-def _model(enable=True, gate_init=0.1, matchability=True):
+def _model(enable=True, learned=False, matchability=True):
     model = Pointformer.__new__(Pointformer)
     nn.Module.__init__(model)
     model.cfg = _sav_cfg()
     model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE = matchability
     model.pot_route_cfg = model.cfg.FEW_SHOT.POT_ROUTE
     model.pot_route_cfg.TEMPORAL_REFINEMENT.ENABLE = enable
-    model.pot_route_cfg.TEMPORAL_REFINEMENT.GATE_INIT = gate_init
     model.use_frame_softmax_route = True
     model.use_query_partial_q2s = True
     model.use_cat_cost_aggregation = False
@@ -36,6 +35,9 @@ def _model(enable=True, gate_init=0.1, matchability=True):
     model.support_text_fusion_cfg = model.cfg.FEW_SHOT.SUPPORT_TEXT_FUSION
     model._get_pot_label_text_features = lambda ids, dtype: torch.eye(2, dtype=dtype)
     model._init_temporal_similarity_refinement()
+    if learned and model.temporal_similarity_refiner is not None:
+        with torch.no_grad():
+            model.temporal_similarity_refiner.out_proj.weight.fill_(0.1)
     return model
 
 
@@ -70,12 +72,11 @@ def test_shape_dtype_range_and_bounded_correction(dtype):
     model = TrajectoryTemporalSimilarityRefiner()
     x = torch.linspace(-1, 1, 60).reshape(3, 5, 4).to(dtype)
     y = model(x, torch.ones(5, 4, dtype=torch.bool))
-    assert y.shape == x.shape and y.dtype == dtype
+    assert y.shape == x.shape and y.dtype == torch.float32
     assert torch.isfinite(y).all()
-    assert y.min() >= -1 and y.max() <= 1
-    bound = model.max_delta * model.gate.tanh().abs()
-    assert (y.float() - x.float()).abs().max() <= bound + torch.finfo(dtype).eps
-    assert sum(p.numel() for p in model.parameters()) == 130
+    assert y.min() >= -model.max_logit_delta
+    assert y.max() <= model.max_logit_delta
+    assert sum(p.numel() for p in model.parameters()) == 960
 
 
 @pytest.mark.parametrize("shape", [(0, 4, 3), (2, 0, 3), (2, 4, 0), (2, 1, 3)])
@@ -85,16 +86,25 @@ def test_empty_axes_and_single_frame(shape):
     assert y.shape == shape and torch.isfinite(y).all()
 
 
-@pytest.mark.parametrize("kwargs", [{"gate_init": 0.0}, {"max_delta": 0.0}])
-def test_zero_strength_is_exact_identity(kwargs):
+def test_zero_strength_returns_zero_residual():
     x = torch.linspace(-1, 1, 30).reshape(2, 5, 3)
-    y = TrajectoryTemporalSimilarityRefiner(**kwargs)(x, torch.ones(5, 3).bool())
-    assert torch.equal(x, y)
+    y = TrajectoryTemporalSimilarityRefiner(max_logit_delta=0.0)(
+        x, torch.ones(5, 3).bool(),
+    )
+    assert torch.equal(y, torch.zeros_like(y))
+
+
+def test_zero_initialized_projection_returns_zero_residual():
+    x = torch.linspace(-1, 1, 30).reshape(2, 5, 3)
+    y = TrajectoryTemporalSimilarityRefiner()(x, torch.ones(5, 3).bool())
+    assert torch.equal(y, torch.zeros_like(y))
 
 
 def test_no_class_or_trajectory_mixing_and_permutation_equivariance():
     torch.manual_seed(11)
     model = TrajectoryTemporalSimilarityRefiner()
+    with torch.no_grad():
+        model.out_proj.weight.fill_(0.1)
     x = torch.rand(2, 5, 3)
     mask = torch.rand(5, 3) > 0.2
     y = model(x, mask)
@@ -107,14 +117,37 @@ def test_no_class_or_trajectory_mixing_and_permutation_equivariance():
     assert torch.equal(model(x[:, :, order], mask[:, order]), y[:, :, order])
 
 
+def test_batched_forward_matches_stacked_sample_forward():
+    torch.manual_seed(13)
+    model = TrajectoryTemporalSimilarityRefiner()
+    with torch.no_grad():
+        model.out_proj.weight.fill_(0.1)
+    x = torch.rand(4, 2, 5, 3)
+    mask = torch.rand(4, 5, 3) > 0.2
+    batched = model(x, mask)
+    stacked = torch.stack([model(x[idx], mask[idx]) for idx in range(4)])
+    assert torch.allclose(batched, stacked, atol=1e-6, rtol=1e-5)
+
+
+def test_linear_conv_matches_native_conv():
+    torch.manual_seed(15)
+    model = TrajectoryTemporalSimilarityRefiner()
+    value = torch.randn(7, 16, 8)
+    expected = model.long_temporal_conv(value)
+    actual = model._linear_conv1d(value, model.long_temporal_conv)
+    assert torch.allclose(actual, expected, atol=1e-6, rtol=1e-5)
+
+
 def test_neighbors_really_affect_current_similarity_with_local_receptive_field():
-    model = TrajectoryTemporalSimilarityRefiner(hidden_dim=1, gate_init=1.0)
+    model = TrajectoryTemporalSimilarityRefiner(hidden_dim=1)
     with torch.no_grad():
         model.temporal_conv.weight.zero_()
         model.temporal_conv.weight[0, 0, 0] = 1.0  # Previous frame only.
         model.temporal_conv.bias.zero_()
+        model.long_temporal_conv.weight.zero_()
+        model.long_temporal_conv.weight[0, 0, 1] = 1.0
+        model.long_temporal_conv.bias.zero_()
         model.out_proj.weight.fill_(1.0)
-        model.out_proj.bias.zero_()
     x = torch.zeros(1, 6, 2)
     mask = torch.ones(6, 2).bool()
     original = model(x, mask)
@@ -129,6 +162,8 @@ def test_neighbors_really_affect_current_similarity_with_local_receptive_field()
 def test_invalid_observations_cannot_pollute_neighbors_even_without_mask_channel(use_visibility):
     torch.manual_seed(17)
     model = TrajectoryTemporalSimilarityRefiner(use_visibility=use_visibility)
+    with torch.no_grad():
+        model.out_proj.weight.fill_(0.1)
     x = torch.rand(2, 5, 3)
     mask = torch.ones(5, 3).bool()
     mask[2, 0] = False
@@ -137,9 +172,12 @@ def test_invalid_observations_cannot_pollute_neighbors_even_without_mask_channel
     out_x, out_y = model(x, mask), model(y, mask)
     valid = mask.unsqueeze(0).expand_as(x)
     assert torch.equal(out_x[valid], out_y[valid])
-    assert torch.equal(out_x[:, 2, 0], x[:, 2, 0])
-    assert torch.equal(out_y[:, 2, 0], y[:, 2, 0])
-    assert torch.equal(model(x, torch.zeros_like(mask)), x)
+    assert torch.equal(out_x[:, 2, 0], torch.zeros_like(out_x[:, 2, 0]))
+    assert torch.equal(out_y[:, 2, 0], torch.zeros_like(out_y[:, 2, 0]))
+    assert torch.equal(
+        model(x, torch.zeros_like(mask)),
+        torch.zeros_like(out_x),
+    )
 
 
 def test_nonfinite_input_is_sanitized():
@@ -150,8 +188,8 @@ def test_nonfinite_input_is_sanitized():
 
 @pytest.mark.parametrize("kwargs", [
     {"kernel_size": 2}, {"kernel_size": 0}, {"kernel_size": 1.5},
-    {"hidden_dim": 0}, {"max_delta": -1}, {"max_delta": float("nan")},
-    {"gate_init": float("inf")},
+    {"hidden_dim": 0}, {"long_dilation": 0},
+    {"max_logit_delta": -1}, {"max_logit_delta": float("nan")},
 ])
 def test_invalid_hyperparameters_fail(kwargs):
     with pytest.raises(ValueError):
@@ -166,9 +204,11 @@ def test_shape_errors_are_explicit():
         model(torch.zeros(2, 3, 4), torch.ones(3, 5))
 
 
-def test_initial_conv_and_gate_receive_gradients_under_autocast():
+def test_all_temporal_parameters_receive_gradients_after_projection_activates():
     torch.manual_seed(19)
     model = TrajectoryTemporalSimilarityRefiner()
+    with torch.no_grad():
+        model.out_proj.weight.fill_(0.1)
     x = torch.rand(2, 5, 3, requires_grad=True)
     with torch.autocast("cpu", dtype=torch.bfloat16):
         output = model(x, torch.ones(5, 3).bool())
@@ -182,10 +222,10 @@ def test_initial_conv_and_gate_receive_gradients_under_autocast():
 
 
 @pytest.mark.parametrize("matchability", [False, True])
-def test_zero_gate_and_disabled_branch_preserve_complete_legacy_outputs(matchability):
+def test_zero_projection_and_disabled_branch_preserve_complete_legacy_outputs(matchability):
     post, raw, metadata = _episode()
     disabled = _model(enable=False, matchability=matchability)
-    enabled = _model(gate_init=0.0, matchability=matchability)
+    enabled = _model(matchability=matchability)
     old = _run(disabled, post, raw, metadata)
     new = _run(enabled, post, raw, metadata)
     assert old.keys() == new.keys()
@@ -208,43 +248,31 @@ def test_shared_support_query_and_reference_router_uses_real_visibility():
     result = _run(model, post, raw, metadata)
     hook.remove()
     expected_mask = metadata["pred_query_mask"] & metadata["pred_visibility"]
-    # Positive Support, local Positive/Confuser references, Query, confusers.
-    sample_order = [0, 1, 0, 1, 2, 0, 1]
-    assert len(calls) == len(sample_order)
-    for (scores, mask), sample_idx in zip(calls, sample_order):
-        assert torch.equal(mask, expected_mask[sample_idx])
-        assert scores.shape[1:] == (4, 3)
-    assert calls[0][0].shape[0] == calls[1][0].shape[0] == 1
-    assert calls[4][0].shape[0] == 2
+    assert len(calls) == 2
+    assert calls[0][0].shape == (2, 2, 4, 3)
+    assert calls[1][0].shape == (1, 2, 4, 3)
+    assert torch.equal(calls[0][1], expected_mask[:2])
+    assert torch.equal(calls[1][1], expected_mask[2:])
 
     fused = result["support_text_fusion_query_features"]
     expected_proto, expected_weights = model._compute_frame_softmax_text_prototypes(
         post[2], metadata["pred_query_mask"][2], fused,
         temporal_point_mask=expected_mask[2],
     )
-    assert torch.equal(result["query_partial_query_prototypes"][0], expected_proto)
-    assert torch.equal(result["query_patch_conditional_weights"][0], expected_weights)
+    assert torch.allclose(result["query_partial_query_prototypes"][0], expected_proto)
     # Temporal invisibility does not silently change the original spatial mask.
     assert expected_weights[:, 1, 2].gt(0).all()
-    # Specificity still verifies the same pi after its existing visibility mask.
-    evidence = expected_weights * expected_mask[2].unsqueeze(0)
-    evidence = evidence / evidence.sum(dim=-1, keepdim=True)
-    assert torch.allclose(result["query_evidence_patch_weights"][0], evidence)
+    assert "query_evidence_patch_weights" not in result
 
 
-def test_enabled_route_changes_prototypes_but_not_raw_absolute_mass_or_query_label_dependence():
+def test_learned_route_changes_prototypes_without_query_label_leakage():
     torch.manual_seed(29)
-    model = _model()
+    model = _model(learned=True)
     post, raw, metadata = _episode()
     new = _run(model, post, raw, metadata)
     old = _run(_model(enable=False), post, raw, metadata)
-    assert not torch.equal(new["query_patch_conditional_weights"], old["query_patch_conditional_weights"])
     assert not torch.equal(new["query_partial_query_prototypes"], old["query_partial_query_prototypes"])
-    assert torch.equal(new["query_frame_absolute_patch_mass"], old["query_frame_absolute_patch_mass"])
-    assert torch.equal(
-        new["query_frame_target_mass"],
-        new["query_frame_absolute_patch_mass"] * new["query_frame_matchability"],
-    )
+    assert "query_frame_absolute_patch_mass" not in new
     changed = dict(metadata)
     changed["episode_positive_labels"] = metadata["episode_positive_labels"].clone()
     changed["episode_positive_labels"][2] = False
@@ -270,7 +298,7 @@ def test_spatial_all_invalid_rows_remain_zero_and_precomputed_costs_bypass_refin
 
 def test_enabled_full_route_backward_reaches_shared_refiner():
     torch.manual_seed(37)
-    model = _model()
+    model = _model(learned=True)
     post, raw, metadata = _episode()
     post.requires_grad_()
     result = _run(model, post, raw, metadata)
@@ -353,4 +381,7 @@ def test_real_constructor_preserves_old_weights_and_registers_optimizer_paramete
     assert not old_checkpoint.unexpected_keys
     optimizer = construct_optimizer(temporal, cfg)
     optimized_ids = {id(p) for group in optimizer.param_groups for p in group["params"]}
-    assert all(id(p) in optimized_ids for p in temporal.temporal_similarity_refiner.parameters())
+    assert all(
+        id(p) in optimized_ids
+        for p in temporal.temporal_similarity_refiner.parameters()
+    )
