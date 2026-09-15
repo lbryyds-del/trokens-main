@@ -15,7 +15,7 @@ from torch.nn.init import trunc_normal_
 from trokens.models.attention import TrajectoryAttentionBlock
 from trokens.models.cat_spatial_aggregation import CATSpatialCostAggregator
 from trokens.models.temporal_similarity_refiner import (
-    TrajectoryTemporalSimilarityRefiner,
+    TrajectoryCostAttentionRefiner,
 )
 from trokens.models.branches.motion_blocks import (
     CrossMotionModule,
@@ -492,12 +492,13 @@ class Pointformer(nn.Module):
             raise ValueError("TEMPORAL_REFINEMENT requires tracked point inputs.")
         # Preserve the baseline RNG stream for subsequent episodic sampling.
         with torch.random.fork_rng(devices=[]):
-            self.temporal_similarity_refiner = TrajectoryTemporalSimilarityRefiner(
-                hidden_dim=getattr(temporal_cfg, "HIDDEN_DIM", 16),
-                kernel_size=getattr(temporal_cfg, "KERNEL_SIZE", 3),
-                long_dilation=getattr(temporal_cfg, "LONG_DILATION", 2),
+            self.temporal_similarity_refiner = TrajectoryCostAttentionRefiner(
+                feature_dim=self.embed_dim,
+                cost_dim=getattr(temporal_cfg, "COST_DIM", 16),
+                guidance_dim=getattr(temporal_cfg, "GUIDANCE_DIM", 16),
+                attention_dim=getattr(temporal_cfg, "ATTENTION_DIM", 16),
+                radius=getattr(temporal_cfg, "RADIUS", 2),
                 max_logit_delta=getattr(temporal_cfg, "MAX_LOGIT_DELTA", 0.5),
-                use_visibility=getattr(temporal_cfg, "USE_VISIBILITY", True),
             )
 
     def hook_fn(self, feat_dict, layer_name):
@@ -1161,7 +1162,13 @@ class Pointformer(nn.Module):
             )
         return point_mask.bool() & visibility.to(device=point_mask.device).bool()
 
-    def _refine_trajectory_similarity(self, similarity, point_mask, softmax_tau=None):
+    def _refine_trajectory_similarity(
+        self,
+        similarity,
+        patch_tokens,
+        point_mask,
+        softmax_tau=None,
+    ):
         if not bool(getattr(self, "use_temporal_similarity_refinement", False)):
             return similarity
         refiner = getattr(self, "temporal_similarity_refiner", None)
@@ -1172,7 +1179,7 @@ class Pointformer(nn.Module):
         tau = max(float(softmax_tau), 1e-6)
         # The refiner returns a bounded logit residual; convert it to the
         # similarity units consumed by the canonical spatial-softmax builder.
-        delta_logits = refiner(similarity, point_mask)
+        delta_logits = refiner(similarity, patch_tokens, point_mask)
         return similarity.float() + tau * delta_logits.float()
 
     def _compute_frame_softmax_text_prototypes(
@@ -1202,6 +1209,7 @@ class Pointformer(nn.Module):
         tau = max(float(getattr(self.pot_route_cfg, "FRAME_SOFTMAX_TAU", 0.07)), 1e-6)
         similarity = self._refine_trajectory_similarity(
             similarity,
+            patch_tokens,
             point_mask if temporal_point_mask is None else temporal_point_mask,
             softmax_tau=tau,
         )
@@ -1230,6 +1238,7 @@ class Pointformer(nn.Module):
         )
         similarity = self._refine_trajectory_similarity(
             similarity,
+            patch_tokens,
             point_mask if temporal_point_mask is None else temporal_point_mask,
             softmax_tau=tau,
         )

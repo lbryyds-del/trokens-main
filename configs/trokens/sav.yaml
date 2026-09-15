@@ -41,14 +41,14 @@ FEW_SHOT:
     FRAME_SOFTMAX_TAU: 0.04
     TEMPORAL_REFINEMENT:
       ENABLE: True
-      TYPE: lite_tcn_3ch_v1
-      HIDDEN_DIM: 16
-      KERNEL_SIZE: 3
-      LONG_DILATION: 2
+      COST_DIM: 16
+      GUIDANCE_DIM: 16
+      ATTENTION_DIM: 16
+      # Attend to the current observation and two sampled frames on each side.
+      RADIUS: 2
       # Fixed bound in spatial-softmax logit units.
       MAX_LOGIT_DELTA: 0.5
       WEIGHT_DECAY: 0.01
-      USE_VISIBILITY: True
     QUERY_PARTIAL_ENABLE: True
     QUERY_PARTIAL_LOGIT_ALPHA: 10.0
     QUERY_PARTIAL_LOGIT_BIAS: -2.0

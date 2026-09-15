@@ -53,7 +53,9 @@ def construct_optimizer(model, cfg):
 
     for name, p in model.named_parameters():
         if "temporal_similarity_refiner" in name and p.requires_grad:
-            if name.endswith(".bias"):
+            # Biases, LayerNorm parameters and the learned relative-time bias
+            # are all one-dimensional and should not be weight-decayed.
+            if p.ndim == 1 or name.endswith(".bias"):
                 temporal_zero_parameters.append(p)
             else:
                 temporal_parameters.append(p)
