@@ -349,67 +349,7 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
             )
             scores = patch_q2s_logits.detach().float().cpu().numpy()
             targets = q2s_labels.detach().float().cpu().numpy()
-            query_null_rows = None
             query_matchability_rows = None
-            if (
-                isinstance(few_shot_aux, dict)
-                and "query_null_weights" in few_shot_aux
-            ):
-                frame_null = (
-                    few_shot_aux["query_null_weights"]
-                    .detach()
-                    .float()
-                    .cpu()
-                    .numpy()
-                )
-                expected_shape = (*targets.shape, frame_null.shape[-1])
-                if frame_null.shape != expected_shape:
-                    raise ValueError(
-                        "query_null_weights must align with q2s labels; got "
-                        f"{frame_null.shape}, expected {expected_shape}."
-                    )
-                diag_similarity = (
-                    few_shot_aux["query_partial_diag_similarity"]
-                    .detach()
-                    .float()
-                    .cpu()
-                    .numpy()
-                )
-                null_score = float(
-                    few_shot_aux["query_null_score"].detach().float().item()
-                )
-                query_null_rows = {
-                    "mean": frame_null.mean(axis=-1),
-                    "min": frame_null.min(axis=-1),
-                    "max": frame_null.max(axis=-1),
-                    "frame_fraction_gt_0p5": (frame_null > 0.5).mean(axis=-1),
-                    "diag_similarity": diag_similarity,
-                    "score": null_score,
-                    "support_mean_abs_cosine": float(
-                        few_shot_aux[
-                            "query_null_support_mean_abs_cosine"
-                        ].detach().float().item()
-                    ),
-                    "support_max_abs_cosine": float(
-                        few_shot_aux[
-                            "query_null_support_max_abs_cosine"
-                        ].detach().float().item()
-                    ),
-                }
-                if bool(getattr(
-                    cfg.FEW_SHOT.QUERY_NULL_ROUTE,
-                    "CARDINALITY_CORRECTION",
-                    True,
-                )):
-                    clipped_null = np.clip(frame_null, 1e-6, 1.0 - 1e-6)
-                    frame_evidence_lme = null_score - float(
-                        cfg.FEW_SHOT.POT_ROUTE.FRAME_SOFTMAX_TAU
-                    ) * np.log(clipped_null / (1.0 - clipped_null))
-                    query_null_rows.update({
-                        "evidence_lme_mean": frame_evidence_lme.mean(axis=-1),
-                        "evidence_lme_min": frame_evidence_lme.min(axis=-1),
-                        "evidence_lme_max": frame_evidence_lme.max(axis=-1),
-                    })
             if (
                 isinstance(few_shot_aux, dict)
                 and "query_class_matchability" in few_shot_aux
@@ -579,53 +519,6 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
                         'score': float(scores[query_idx, episode_idx]),
                         'label': float(targets[query_idx, episode_idx]),
                     }
-                    if query_null_rows is not None:
-                        row.update({
-                            "query_null_mean": float(
-                                query_null_rows["mean"][query_idx, episode_idx]
-                            ),
-                            "query_null_min": float(
-                                query_null_rows["min"][query_idx, episode_idx]
-                            ),
-                            "query_null_max": float(
-                                query_null_rows["max"][query_idx, episode_idx]
-                            ),
-                            "query_null_frame_fraction_gt_0p5": float(
-                                query_null_rows[
-                                    "frame_fraction_gt_0p5"
-                                ][query_idx, episode_idx]
-                            ),
-                            "query_null_score": query_null_rows["score"],
-                            "query_null_diag_similarity": float(
-                                query_null_rows[
-                                    "diag_similarity"
-                                ][query_idx, episode_idx]
-                            ),
-                            "query_null_support_mean_abs_cosine": (
-                                query_null_rows["support_mean_abs_cosine"]
-                            ),
-                            "query_null_support_max_abs_cosine": (
-                                query_null_rows["support_max_abs_cosine"]
-                            ),
-                        })
-                        if "evidence_lme_mean" in query_null_rows:
-                            row.update({
-                                "query_null_evidence_lme_mean": float(
-                                    query_null_rows[
-                                        "evidence_lme_mean"
-                                    ][query_idx, episode_idx]
-                                ),
-                                "query_null_evidence_lme_min": float(
-                                    query_null_rows[
-                                        "evidence_lme_min"
-                                    ][query_idx, episode_idx]
-                                ),
-                                "query_null_evidence_lme_max": float(
-                                    query_null_rows[
-                                        "evidence_lme_max"
-                                    ][query_idx, episode_idx]
-                                ),
-                            })
                     if (
                         query_matchability_rows is not None
                         and query_matchability_rows["matchability"].shape

@@ -4,7 +4,7 @@ OUTPUT_DIR: output/sav
 
 FEW_SHOT:
   N_WAY: 5
-  K_SHOT: 1
+  K_SHOT: 5
   TRAIN_QUERY_PER_CLASS: 6
   TEST_QUERY_PER_CLASS: 1
   TRAIN_EPISODES: 2000
@@ -17,25 +17,6 @@ FEW_SHOT:
     TEXT_WEIGHT: 1.0
     VISUAL_WEIGHT: 1.0
     VISUAL_DETACH: True
-  COST_AGG:
-    ENABLE: False
-    COST_DIM: 32
-    GUIDANCE_DIM: 32
-    NUM_HEADS: 4
-    WINDOW_SIZE: 4
-    NUM_LAYERS: 1
-    MLP_RATIO: 4.0
-    ATTN_DROPOUT: 0.0
-    PROJ_DROPOUT: 0.0
-    CLASS_AGG:
-      ENABLE: False
-      GUIDANCE_DIM: 32
-      NUM_HEADS: 4
-      ATTENTION_TYPE: full
-      POOLING_SIZE: 1
-      PAD_LEN: 0
-      MLP_RATIO: 4.0
-      GATE_INIT: 0.0
   POT_ROUTE:
     ENABLE: True
     FRAME_SOFTMAX_TAU: 0.04
@@ -52,23 +33,14 @@ FEW_SHOT:
     QUERY_PARTIAL_ENABLE: True
     QUERY_PARTIAL_LOGIT_ALPHA: 10.0
     QUERY_PARTIAL_LOGIT_BIAS: -2.0
-  # Retain 8.63 for ablation, but do not couple patch routing to a learned Null.
-  QUERY_NULL_ROUTE:
-    ENABLE: False
-    SCORE_INIT: 0.07
-    SCORE_MIN: -0.20
-    SCORE_MAX: 0.80
-    CARDINALITY_CORRECTION: True
-    TOKEN_INIT_STD: 0.02
-    VALUE_SCALE: 1.0
-    DETACH_FRAME_SCALE: True
-    ORTHO_WEIGHT: 0.01
-    ORTHO_DETACH_SUPPORT: True
   QUERY_CLASS_MATCHABILITY:
     ENABLE: True
-    # Disable Query uniqueness (Positive-vs-Confuser relative margin).
-    # Keep the base Query class-decoupled frame-softmax route enabled.
-    MODE: "threshold"
+    # Only toggle these two flags for quality / uniqueness ablations.
+    # Query routing and temporal refinement remain enabled independently.
+    QUALITY_ENABLE: False
+    UNIQUENESS_ENABLE: False
+    # Algorithm choice, not an on/off switch; toggling flags does not change it.
+    MODE: "positive_confuser_margin"
     # Legacy threshold-mode evidence (kept for R1 rollback/comparison).
     TOPK_PATCHES: 8
     TOPK_FRAMES: 3
@@ -98,8 +70,8 @@ FEW_SHOT:
     # Frame specificity verifies the same class-conditioned post-Pointformer
     # patch distribution pi that constructs Q_k. No second text-patch route is
     # built for specificity.
-    # Disable the frame-level specificity/evidence verification branch.
-    EVIDENCE_VERIFICATION_ENABLE: False
+    # Subordinate to UNIQUENESS_ENABLE; leave enabled for normal SAV toggles.
+    EVIDENCE_VERIFICATION_ENABLE: True
     EVIDENCE_USE_VISIBILITY: True
     EVIDENCE_POSITIVE_AGGREGATION: "topk_mean"
     EVIDENCE_POSITIVE_TOPK: 2
@@ -114,13 +86,13 @@ FEW_SHOT:
     # Weak video-label supervision over the strongest Evidence margins.
     EVIDENCE_VIDEO_TOPK_FRAMES: 3
     EVIDENCE_MIL_TEMPERATURE: 0.10
-    # No Evidence-MIL objective while the frame verifier is disabled.
-    EVIDENCE_MIL_LOSS_WEIGHT: 0.0
+    # Automatically inactive when uniqueness / frame verification is disabled.
+    EVIDENCE_MIL_LOSS_WEIGHT: 0.10
     # Pure-text Raw evidence supplies absolute non-null mass m. Together with
     # frame specificity rho, the single transported target mass is g=m*rho;
     # the rejected confuser/null mass remains outside both BiMHM directions.
-    # Disable the absolute quality/mass branch.
-    ABSOLUTE_MASS_ENABLE: False
+    # Subordinate to QUALITY_ENABLE; leave enabled for normal SAV toggles.
+    ABSOLUTE_MASS_ENABLE: True
     ABSOLUTE_MASS_SOURCE: "raw"
     ABSOLUTE_MASS_USE_VISIBILITY: True
     ABSOLUTE_MASS_PATCH_TOPK: 8

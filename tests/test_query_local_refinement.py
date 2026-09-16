@@ -299,8 +299,6 @@ def test_wrapper_outputs_local_diagnostics_and_ignores_query_targets():
         QUERY_PARTIAL_LOGIT_ALPHA=10.0,
         QUERY_PARTIAL_LOGIT_BIAS=-2.0,
     )
-    model.use_query_null_route = False
-    model.use_cat_cost_aggregation = False
     model.use_support_text_fusion = False
     model._get_pot_label_text_features = (
         lambda class_ids, dtype: torch.eye(2, dtype=dtype)

@@ -20,17 +20,17 @@ def _sav_cfg():
     return cfg
 
 
-def _model(enable=True, learned=False, matchability=True):
+def _model(enable=True, learned=False, matchability=True, quality=True, uniqueness=True):
     model = Pointformer.__new__(Pointformer)
     nn.Module.__init__(model)
     model.cfg = _sav_cfg()
     model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE = matchability
+    model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.QUALITY_ENABLE = quality
+    model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.UNIQUENESS_ENABLE = uniqueness
     model.pot_route_cfg = model.cfg.FEW_SHOT.POT_ROUTE
     model.pot_route_cfg.TEMPORAL_REFINEMENT.ENABLE = enable
     model.use_frame_softmax_route = True
     model.use_query_partial_q2s = True
-    model.use_cat_cost_aggregation = False
-    model.use_query_null_route = False
     model.use_support_text_fusion = True
     model.support_text_fusion_cfg = model.cfg.FEW_SHOT.SUPPORT_TEXT_FUSION
     model._get_pot_label_text_features = lambda ids, dtype: torch.eye(2, dtype=dtype)
@@ -65,6 +65,55 @@ def _run(model, post, raw, metadata):
     return model._build_frame_softmax_q2s_aux(
         post, metadata, matchability_evidence_tokens=raw,
     )
+
+
+@pytest.mark.parametrize("quality", [False, True])
+@pytest.mark.parametrize("uniqueness", [False, True])
+def test_independent_judgment_switches_gate_compute_and_loss(quality, uniqueness, monkeypatch):
+    import trokens.models.query_class_matchability as match_module
+    from tools.few_shot_multilabel import compute_query_partial_q2s_loss
+
+    model = _model(learned=True, quality=quality, uniqueness=uniqueness)
+    cfg = model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY
+    assert cfg.MODE == "positive_confuser_margin"
+    assert cfg.EVIDENCE_MIL_LOSS_WEIGHT == 0.10
+
+    def disabled(*args, **kwargs):
+        pytest.fail("disabled judgment was computed")
+
+    if not quality:
+        monkeypatch.setattr(match_module, "compute_support_calibrated_frame_transport_mass", disabled)
+    if not uniqueness:
+        for name in (
+            "build_class_local_support_references", "build_class_confuser_prototypes",
+            "compute_local_positive_confuser_margin", "compute_matchability_from_similarity",
+            "_compute_relative_matchability_with_diagnostics",
+        ):
+            monkeypatch.setattr(match_module, name, disabled)
+    post, raw, metadata = _episode()
+    post.requires_grad_()
+    calls = []
+    hook = model.temporal_similarity_refiner.register_forward_pre_hook(
+        lambda module, args: calls.append(args[0].shape)
+    )
+    result = _run(model, post, raw, metadata)
+    hook.remove()
+    assert len(calls) == 2
+    assert ("query_frame_absolute_patch_mass" in result) == quality
+    assert ("query_frame_matchability" in result) == uniqueness
+    if quality or uniqueness:
+        mass = result.get("query_frame_absolute_patch_mass", 1.0)
+        rho = result.get("query_frame_matchability", 1.0)
+        assert torch.allclose(result["query_frame_target_mass"], mass * rho)
+    else:
+        assert torch.equal(result["query_partial_q2s_logits"], result["query_partial_q2s_base_logits"])
+    loss, _, diagnostics = compute_query_partial_q2s_loss(
+        result["query_partial_q2s_logits"], torch.tensor([[1.0, 0.0]]), result, model.cfg,
+    )
+    assert ("q2s_evidence_mil_loss" in diagnostics) == uniqueness
+    loss.backward()
+    for name, parameter in model.temporal_similarity_refiner.named_parameters():
+        assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), name
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
@@ -250,9 +299,9 @@ def test_shared_support_query_and_reference_router_uses_real_visibility():
     expected_mask = metadata["pred_query_mask"] & metadata["pred_visibility"]
     assert len(calls) == 2
     assert calls[0][0].shape == (2, 2, 4, 3)
-    assert calls[1][0].shape == (1, 2, 4, 3)
+    assert calls[1][0].shape == (3, 2, 4, 3)
     assert torch.equal(calls[0][1], expected_mask[:2])
-    assert torch.equal(calls[1][1], expected_mask[2:])
+    assert torch.equal(calls[1][1], expected_mask)
 
     fused = result["support_text_fusion_query_features"]
     expected_proto, expected_weights = model._compute_frame_softmax_text_prototypes(
@@ -260,9 +309,12 @@ def test_shared_support_query_and_reference_router_uses_real_visibility():
         temporal_point_mask=expected_mask[2],
     )
     assert torch.allclose(result["query_partial_query_prototypes"][0], expected_proto)
+    assert torch.allclose(result["query_patch_conditional_weights"][0], expected_weights)
     # Temporal invisibility does not silently change the original spatial mask.
     assert expected_weights[:, 1, 2].gt(0).all()
-    assert "query_evidence_patch_weights" not in result
+    evidence = expected_weights * expected_mask[2].unsqueeze(0)
+    evidence = evidence / evidence.sum(dim=-1, keepdim=True)
+    assert torch.allclose(result["query_evidence_patch_weights"][0], evidence)
 
 
 def test_learned_route_changes_prototypes_without_query_label_leakage():
@@ -272,7 +324,14 @@ def test_learned_route_changes_prototypes_without_query_label_leakage():
     new = _run(model, post, raw, metadata)
     old = _run(_model(enable=False), post, raw, metadata)
     assert not torch.equal(new["query_partial_query_prototypes"], old["query_partial_query_prototypes"])
-    assert "query_frame_absolute_patch_mass" not in new
+    assert torch.equal(
+        new["query_frame_absolute_patch_mass"],
+        old["query_frame_absolute_patch_mass"],
+    )
+    assert torch.allclose(
+        new["query_frame_target_mass"],
+        new["query_frame_absolute_patch_mass"] * new["query_frame_matchability"],
+    )
     changed = dict(metadata)
     changed["episode_positive_labels"] = metadata["episode_positive_labels"].clone()
     changed["episode_positive_labels"][2] = False
@@ -328,15 +387,11 @@ def test_default_off_sav_on_registration_rng_and_checkpoint_roundtrip():
     assert torch.equal(model._refine_trajectory_similarity(x, mask), copy._refine_trajectory_similarity(x, mask))
 
 
-@pytest.mark.parametrize("route", ["cat", "null", "local", "no_points", "no_q2s"])
+@pytest.mark.parametrize("route", ["local", "no_points", "no_q2s"])
 def test_incompatible_routes_fail_instead_of_silently_bypassing_temporal_refinement(route):
     model = _model(enable=False)
     model.pot_route_cfg.TEMPORAL_REFINEMENT.ENABLE = True
-    if route == "cat":
-        model.use_cat_cost_aggregation = True
-    elif route == "null":
-        model.use_query_null_route = True
-    elif route == "local":
+    if route == "local":
         model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_REFINEMENT_ENABLE = True
     elif route == "no_points":
         model.cfg.POINT_INFO.ENABLE = False

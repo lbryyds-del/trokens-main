@@ -40,20 +40,22 @@ def _cfg(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_config_enables_matchability_and_disables_learned_null():
+def test_config_enables_routing_with_independent_judgment_switches():
     cfg = get_cfg()
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE is False
-    assert cfg.FEW_SHOT.QUERY_NULL_ROUTE.ENABLE is False
+    assert not hasattr(cfg.FEW_SHOT, "QUERY_NULL_ROUTE")
+    assert not hasattr(cfg.FEW_SHOT, "COST_AGG")
 
     cfg.merge_from_file(str(REPO_ROOT / "configs/trokens/sav.yaml"))
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE is True
-    assert cfg.FEW_SHOT.QUERY_NULL_ROUTE.ENABLE is False
+    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.QUALITY_ENABLE is False
+    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.UNIQUENESS_ENABLE is False
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.TOPK_PATCHES == 8
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.TOPK_FRAMES == 3
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_SOURCE == "post"
     assert (
         cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.MODE
-        == "threshold"
+        == "positive_confuser_margin"
     )
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_REFINEMENT_ENABLE is False
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_LOGIT_STRENGTH == 0.50
@@ -64,7 +66,7 @@ def test_config_enables_matchability_and_disables_learned_null():
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DUAL_LOGIT_LOSS_ENABLE is True
     assert (
         cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_VERIFICATION_ENABLE
-        is False
+        is True
     )
     assert not hasattr(
         cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY,
@@ -73,8 +75,8 @@ def test_config_enables_matchability_and_disables_learned_null():
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_USE_VISIBILITY is True
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_VIDEO_TOPK_FRAMES == 3
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_MIL_TEMPERATURE == 0.10
-    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_MIL_LOSS_WEIGHT == 0.0
-    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_ENABLE is False
+    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_MIL_LOSS_WEIGHT == 0.10
+    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_ENABLE is True
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_SOURCE == "raw"
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_PATCH_TOPK == 8
     assert (
@@ -296,8 +298,6 @@ def test_relative_margin_is_diagnostic_only_during_training():
         QUERY_PARTIAL_LOGIT_BIAS=-2.0,
         FRAME_SOFTMAX_TAU=1.0,
     )
-    model.use_query_null_route = False
-    model.use_cat_cost_aggregation = False
     model.use_support_text_fusion = True
     model.support_text_fusion_cfg = SimpleNamespace(
         TEXT_WEIGHT=1.0,
@@ -358,8 +358,6 @@ def test_relative_margin_ignores_query_label_rows():
         QUERY_PARTIAL_LOGIT_BIAS=-2.0,
         FRAME_SOFTMAX_TAU=1.0,
     )
-    model.use_query_null_route = False
-    model.use_cat_cost_aggregation = False
     model.use_support_text_fusion = False
     text = torch.eye(2)
     model._get_pot_label_text_features = lambda class_ids, dtype: text.to(dtype)
@@ -409,8 +407,6 @@ def test_global_matchability_does_not_change_final_logits():
         QUERY_PARTIAL_LOGIT_BIAS=-2.0,
         FRAME_SOFTMAX_TAU=1.0,
     )
-    model.use_query_null_route = False
-    model.use_cat_cost_aggregation = False
     model.use_support_text_fusion = False
     text = torch.eye(2)
     model._get_pot_label_text_features = lambda class_ids, dtype: text.to(dtype)

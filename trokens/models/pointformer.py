@@ -13,7 +13,7 @@ import numpy as np
 from torch.nn.init import trunc_normal_
 
 from trokens.models.attention import TrajectoryAttentionBlock
-from trokens.models.cat_spatial_aggregation import CATSpatialCostAggregator
+from trokens.config.query_judgments import resolve_query_judgments
 from trokens.models.temporal_similarity_refiner import (
     TrajectoryTemporalSimilarityRefiner,
 )
@@ -85,15 +85,9 @@ class Pointformer(nn.Module):
         self.cfg = cfg
         self.pot_route_cfg = cfg.FEW_SHOT.POT_ROUTE
         self.text_align_cfg = cfg.FEW_SHOT.TEXT_ALIGN
-        self.cost_agg_cfg = getattr(cfg.FEW_SHOT, "COST_AGG", None)
         self.support_text_fusion_cfg = getattr(
             cfg.FEW_SHOT,
             "SUPPORT_TEXT_FUSION",
-            None,
-        )
-        self.query_null_cfg = getattr(
-            cfg.FEW_SHOT,
-            "QUERY_NULL_ROUTE",
             None,
         )
         self.is_multilabel_few_shot = (
@@ -112,21 +106,9 @@ class Pointformer(nn.Module):
         self.use_support_text_fusion = (
             support_text_fusion_requested and self.use_frame_softmax_route
         )
-        cost_agg_requested = bool(
-            getattr(self.cost_agg_cfg, "ENABLE", False)
-        )
-        self.use_cat_cost_aggregation = (
-            cost_agg_requested and self.use_frame_softmax_route
-        )
         self.use_query_partial_q2s = (
             self.use_frame_softmax_route
             and bool(getattr(self.pot_route_cfg, "QUERY_PARTIAL_ENABLE", False))
-        )
-        query_null_requested = bool(
-            getattr(self.query_null_cfg, "ENABLE", False)
-        )
-        self.use_query_null_route = (
-            query_null_requested and self.use_query_partial_q2s
         )
         self.use_text_alignment = (
             self.is_multilabel_few_shot
@@ -149,11 +131,6 @@ class Pointformer(nn.Module):
             raise NotImplementedError(
                 "QUERY_PARTIAL_ENABLE currently requires POT_ROUTE.ENABLE."
             )
-        if query_null_requested and not self.use_query_partial_q2s:
-            raise NotImplementedError(
-                "QUERY_NULL_ROUTE requires POT_ROUTE.ENABLE and "
-                "POT_ROUTE.QUERY_PARTIAL_ENABLE."
-            )
         if (
             self.is_multilabel_few_shot
             and self.text_align_cfg.ENABLE
@@ -162,66 +139,15 @@ class Pointformer(nn.Module):
             raise NotImplementedError(
                 "TEXT_ALIGN currently requires the dinotxt_vitl14_reg4 backbone."
             )
-        if cost_agg_requested and not self.use_frame_softmax_route:
-            raise NotImplementedError(
-                "COST_AGG currently requires the enabled frame_softmax text route."
-            )
         if support_text_fusion_requested and not self.use_frame_softmax_route:
             raise NotImplementedError(
                 "SUPPORT_TEXT_FUSION currently requires the enabled "
                 "frame_softmax text route."
             )
-        if self.use_support_text_fusion and self.use_cat_cost_aggregation:
-            raise NotImplementedError(
-                "SUPPORT_TEXT_FUSION and COST_AGG cannot be enabled together: "
-                "CAT supplies precomputed query costs and would bypass the fused "
-                "query features."
-            )
-        if self.use_cat_cost_aggregation and not cfg.POINT_INFO.ENABLE:
-            raise NotImplementedError(
-                "COST_AGG currently requires POINT_INFO.ENABLE so dense cost "
-                "corrections can be sampled at pred_tracks."
-            )
         self.use_label_text_features = (
             self.use_frame_softmax_route
             or self.use_text_alignment
         )
-        if self.use_query_null_route:
-            score_min = float(self.query_null_cfg.SCORE_MIN)
-            score_max = float(self.query_null_cfg.SCORE_MAX)
-            score_init = float(self.query_null_cfg.SCORE_INIT)
-            token_init_std = float(self.query_null_cfg.TOKEN_INIT_STD)
-            value_scale = float(self.query_null_cfg.VALUE_SCALE)
-            ortho_weight = float(self.query_null_cfg.ORTHO_WEIGHT)
-            if not all(
-                np.isfinite(value)
-                for value in (score_min, score_max, score_init)
-            ) or not score_min < score_init < score_max:
-                raise ValueError(
-                    "QUERY_NULL_ROUTE requires finite SCORE_MIN < SCORE_INIT "
-                    "< SCORE_MAX."
-                )
-            if not np.isfinite(token_init_std) or token_init_std <= 0.0:
-                raise ValueError(
-                    "QUERY_NULL_ROUTE.TOKEN_INIT_STD must be finite and positive."
-                )
-            if not np.isfinite(value_scale) or value_scale <= 0.0:
-                raise ValueError(
-                    "QUERY_NULL_ROUTE.VALUE_SCALE must be finite and positive."
-                )
-            if not np.isfinite(ortho_weight) or ortho_weight < 0.0:
-                raise ValueError(
-                    "QUERY_NULL_ROUTE.ORTHO_WEIGHT must be finite and non-negative."
-                )
-
-            score_ratio = (score_init - score_min) / (score_max - score_min)
-            raw_score = np.log(score_ratio / (1.0 - score_ratio))
-            self.query_null_token = nn.Parameter(
-                torch.empty(1, self.embed_dim)
-            )
-            self.query_null_score_raw = nn.Parameter(
-                torch.tensor(raw_score, dtype=torch.float32)
-            )
         self.num_patches = (224 // self.patch_size) ** 2
         if cfg.POINT_INFO.ENABLE:
             self.point_grid_size = self.get_point_grid_size()
@@ -340,65 +266,10 @@ class Pointformer(nn.Module):
             if self.use_frame_softmax_route or self.use_text_alignment:
                 self.atomic_label_names = self._load_atomic_label_names()
 
-        if self.use_cat_cost_aggregation:
-            cost_dim = int(getattr(self.cost_agg_cfg, "COST_DIM", 32))
-            guidance_dim = int(getattr(self.cost_agg_cfg, "GUIDANCE_DIM", 32))
-            num_heads = int(getattr(self.cost_agg_cfg, "NUM_HEADS", 4))
-            window_size = int(getattr(self.cost_agg_cfg, "WINDOW_SIZE", 4))
-            num_layers = int(getattr(self.cost_agg_cfg, "NUM_LAYERS", 1))
-            mlp_ratio = float(getattr(self.cost_agg_cfg, "MLP_RATIO", 4.0))
-            class_agg_cfg = getattr(self.cost_agg_cfg, "CLASS_AGG", None)
-            self.cat_spatial_cost_aggregator = CATSpatialCostAggregator(
-                appearance_dim=self.embed_dim,
-                cost_dim=cost_dim,
-                guidance_dim=guidance_dim,
-                num_heads=num_heads,
-                window_size=window_size,
-                num_layers=num_layers,
-                input_resolution=(self.patch_num_side, self.patch_num_side),
-                mlp_ratio=mlp_ratio,
-                attn_dropout=float(
-                    getattr(self.cost_agg_cfg, "ATTN_DROPOUT", 0.0)
-                ),
-                proj_dropout=float(
-                    getattr(self.cost_agg_cfg, "PROJ_DROPOUT", 0.0)
-                ),
-                class_attention_enabled=bool(
-                    getattr(class_agg_cfg, "ENABLE", False)
-                ),
-                class_guidance_dim=int(
-                    getattr(class_agg_cfg, "GUIDANCE_DIM", 32)
-                ),
-                class_num_heads=int(
-                    getattr(class_agg_cfg, "NUM_HEADS", num_heads)
-                ),
-                class_attention_type=str(
-                    getattr(class_agg_cfg, "ATTENTION_TYPE", "full")
-                ),
-                class_pooling_size=getattr(
-                    class_agg_cfg,
-                    "POOLING_SIZE",
-                    1,
-                ),
-                class_pad_len=int(
-                    getattr(class_agg_cfg, "PAD_LEN", 0)
-                ),
-                class_mlp_ratio=float(
-                    getattr(class_agg_cfg, "MLP_RATIO", 4.0)
-                ),
-                class_gate_init=float(
-                    getattr(class_agg_cfg, "GATE_INIT", 0.0)
-                ),
-            )
 
         # Initialize weights
         self.init_weights()
         self.apply(self._init_weights)
-        if self.use_query_null_route:
-            trunc_normal_(
-                self.query_null_token,
-                std=float(self.query_null_cfg.TOKEN_INIT_STD),
-            )
         if self.feat_extractor_type == "dino":
             dino_config  = cfg.MODEL.DINO_CONFIG
             torch_home = os.environ.get("TORCH_HOME", os.path.join(os.getcwd(), ".torch-cache"))
@@ -475,18 +346,10 @@ class Pointformer(nn.Module):
                 "TEMPORAL_REFINEMENT requires the frame-softmax Query route."
             )
         match_cfg = getattr(self.cfg.FEW_SHOT, "QUERY_CLASS_MATCHABILITY", None)
-        if (
-            self.use_cat_cost_aggregation
-            or self.use_query_null_route
-            or (
-                bool(getattr(match_cfg, "ENABLE", False))
-                and bool(getattr(match_cfg, "LOCAL_REFINEMENT_ENABLE", False))
-            )
-        ):
+        if resolve_query_judgments(match_cfg).local_refinement:
             raise ValueError(
-                "TEMPORAL_REFINEMENT cannot be combined with COST_AGG, "
-                "QUERY_NULL_ROUTE or local confuser refinement: these bypass "
-                "the shared text-similarity route."
+                "TEMPORAL_REFINEMENT cannot be combined with local confuser "
+                "refinement: it bypasses the shared text-similarity route."
             )
         if not self.cfg.POINT_INFO.ENABLE:
             raise ValueError("TEMPORAL_REFINEMENT requires tracked point inputs.")
@@ -545,8 +408,6 @@ class Pointformer(nn.Module):
             skip = {'pos_embed', 'cls_token', 'st_embed'}
         else:
             skip = {'pos_embed', 'cls_token', 'temp_embed'}
-        if getattr(self, "use_query_null_route", False):
-            skip.update({"query_null_token", "query_null_score_raw"})
         return skip
 
     def get_classifier(self):
@@ -1394,236 +1255,11 @@ class Pointformer(nn.Module):
         )
         return prototypes, patch_weights
 
-    def _get_query_null_score(self):
-        """Map the Query Null score parameter into its configured cosine range."""
-        score_min = float(self.query_null_cfg.SCORE_MIN)
-        score_max = float(self.query_null_cfg.SCORE_MAX)
-        return score_min + (score_max - score_min) * torch.sigmoid(
-            self.query_null_score_raw.float()
-        )
 
-    def _compute_frame_softmax_query_prototypes_with_null(
-        self,
-        patch_tokens,
-        point_mask,
-        label_text_features,
-    ):
-        """Build Query frame prototypes with one shared Null alternative."""
-        label_text_features = torch.nan_to_num(
-            label_text_features.to(device=patch_tokens.device),
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
-        token_norm = self._safe_l2_normalize(patch_tokens, dim=-1)
-        text_norm = self._safe_l2_normalize(label_text_features, dim=-1)
-        similarity = torch.einsum("kc,tnc->ktn", text_norm, token_norm)
-        similarity = torch.nan_to_num(
-            similarity,
-            nan=0.0,
-            posinf=1.0,
-            neginf=-1.0,
-        ).clamp(-1.0, 1.0)
-        return (
-            self
-            ._compute_frame_softmax_query_prototypes_with_null_from_similarity(
-                patch_tokens,
-                point_mask,
-                similarity,
-            )
-        )
 
-    def _compute_frame_softmax_query_prototypes_with_null_from_similarity(
-        self,
-        patch_tokens,
-        point_mask,
-        similarity,
-    ):
-        """Route Query patch and Null mass from a precomputed ``[K,T,N]`` score."""
-        output_dtype = patch_tokens.dtype
-        patch_tokens_fp32 = torch.nan_to_num(
-            patch_tokens.float(),
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
-        point_mask = point_mask.to(device=patch_tokens.device).bool()
-        similarity = similarity.to(device=patch_tokens.device).float()
 
-        temporal_dim, num_points, feat_dim = patch_tokens.shape
-        if tuple(point_mask.shape) != (temporal_dim, num_points):
-            raise ValueError(
-                "Query point_mask must have shape [T,N] matching patch tokens; "
-                f"got {tuple(point_mask.shape)}, expected "
-                f"{(temporal_dim, num_points)}."
-            )
-        if similarity.ndim != 3:
-            raise ValueError(
-                "Query Null similarity must have shape [K,T,N]; got "
-                f"{tuple(similarity.shape)}."
-            )
-        num_labels = similarity.shape[0]
-        expected_shape = (num_labels, temporal_dim, num_points)
-        if tuple(similarity.shape) != expected_shape:
-            raise ValueError(
-                "Query Null similarity must have shape [K,T,N] matching the "
-                f"patch tokens; got {tuple(similarity.shape)}, expected "
-                f"{expected_shape}."
-            )
-        if num_labels == 0:
-            return (
-                patch_tokens.new_zeros(0, temporal_dim, feat_dim),
-                patch_tokens.new_zeros(0, temporal_dim, num_points),
-                patch_tokens.new_zeros(0, temporal_dim),
-            )
 
-        similarity = torch.nan_to_num(
-            similarity,
-            nan=0.0,
-            posinf=1e4,
-            neginf=-1e4,
-        )
-        tau = max(
-            float(getattr(self.pot_route_cfg, "FRAME_SOFTMAX_TAU", 0.07)),
-            1e-6,
-        )
-        expanded_mask = point_mask.unsqueeze(0).expand_as(similarity)
-        patch_logits = (similarity / tau).masked_fill(~expanded_mask, -1e4)
 
-        null_score = self._get_query_null_score().to(device=patch_tokens.device)
-        null_logits = (null_score / tau).view(1, 1, 1).expand(
-            num_labels,
-            temporal_dim,
-            1,
-        )
-        if bool(getattr(
-            self.query_null_cfg,
-            "CARDINALITY_CORRECTION",
-            True,
-        )):
-            valid_count = point_mask.sum(dim=-1).clamp_min(1).float()
-            null_logits = (
-                null_logits
-                + valid_count.log().view(1, temporal_dim, 1)
-            )
-
-        joint_weights = torch.softmax(
-            torch.cat((patch_logits, null_logits), dim=-1),
-            dim=-1,
-        )
-        patch_weights = (
-            joint_weights[..., :-1]
-            * expanded_mask.to(dtype=joint_weights.dtype)
-        )
-        null_weights = joint_weights[..., -1]
-
-        mask_fp32 = point_mask.float()
-        token_norms = patch_tokens_fp32.norm(dim=-1)
-        valid_count_fp32 = mask_fp32.sum(dim=-1)
-        frame_scale = (
-            token_norms * mask_fp32
-        ).sum(dim=-1) / valid_count_fp32.clamp_min(1.0)
-        frame_scale = torch.where(
-            valid_count_fp32 > 0.0,
-            frame_scale,
-            torch.ones_like(frame_scale),
-        )
-        if bool(getattr(
-            self.query_null_cfg,
-            "DETACH_FRAME_SCALE",
-            True,
-        )):
-            frame_scale = frame_scale.detach()
-
-        null_unit = self._safe_l2_normalize(
-            self.query_null_token.to(device=patch_tokens.device),
-            dim=-1,
-        ).squeeze(0)
-        null_values = (
-            float(getattr(self.query_null_cfg, "VALUE_SCALE", 1.0))
-            * frame_scale.unsqueeze(-1)
-            * null_unit.unsqueeze(0)
-        )
-        patch_component = torch.einsum(
-            "ktn,tnd->ktd",
-            patch_weights.float(),
-            patch_tokens_fp32,
-        )
-        null_component = (
-            null_weights.unsqueeze(-1)
-            * null_values.unsqueeze(0)
-        )
-        query_prototypes = torch.nan_to_num(
-            patch_component + null_component,
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
-        return (
-            query_prototypes.to(dtype=output_dtype),
-            patch_weights.to(dtype=output_dtype),
-            null_weights,
-        )
-
-    def _compute_query_null_support_cosines(
-        self,
-        support_prototypes,
-        detach_support,
-    ):
-        """Return Null-to-Support frame cosines and their validity mask."""
-        if support_prototypes.ndim != 3:
-            raise ValueError(
-                "support_prototypes must have shape [K,T,D]; got "
-                f"{tuple(support_prototypes.shape)}."
-            )
-        support = torch.nan_to_num(
-            support_prototypes.float(),
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
-        if detach_support:
-            support = support.detach()
-        valid = support.norm(dim=-1) > 1e-12
-        support_unit = self._safe_l2_normalize(support, dim=-1)
-        null_unit = self._safe_l2_normalize(
-            self.query_null_token.to(device=support.device),
-            dim=-1,
-        ).squeeze(0)
-        cosine = torch.einsum("d,ktd->kt", null_unit, support_unit)
-        cosine = torch.nan_to_num(
-            cosine,
-            nan=0.0,
-            posinf=1.0,
-            neginf=-1.0,
-        ).clamp(-1.0, 1.0)
-        return cosine, valid
-
-    def _compute_query_null_orthogonal_loss(self, support_prototypes):
-        """Penalize squared cosine between the Null token and valid Support frames."""
-        cosine, valid = self._compute_query_null_support_cosines(
-            support_prototypes,
-            detach_support=bool(getattr(
-                self.query_null_cfg,
-                "ORTHO_DETACH_SUPPORT",
-                True,
-            )),
-        )
-        if not valid.any():
-            return cosine.new_zeros(())
-        return cosine[valid].square().mean()
-
-    def _compute_query_null_support_cosine_stats(self, support_prototypes):
-        """Return detached mean/max absolute Null-to-Support cosine diagnostics."""
-        cosine, valid = self._compute_query_null_support_cosines(
-            support_prototypes,
-            detach_support=True,
-        )
-        if not valid.any():
-            zero = cosine.new_zeros(())
-            return zero, zero
-        absolute = cosine[valid].abs()
-        return absolute.mean().detach(), absolute.max().detach()
 
     def _build_frame_softmax_support_prototypes(
         self,
@@ -1632,7 +1268,6 @@ class Pointformer(nn.Module):
         support_mask,
         episode_positive_labels,
         episode_label_text,
-        precomputed_similarity=None,
         temporal_point_mask=None,
     ):
         """Average true-label text-routed support prototypes by episode class."""
@@ -1650,28 +1285,19 @@ class Pointformer(nn.Module):
 
         support_tokens = value_tokens.index_select(0, support_indices)
         support_points = point_mask.index_select(0, support_indices)
-        if precomputed_similarity is None:
-            support_temporal_points = (
-                None
-                if temporal_point_mask is None
-                else temporal_point_mask.index_select(0, support_indices)
+        support_temporal_points = (
+            None
+            if temporal_point_mask is None
+            else temporal_point_mask.index_select(0, support_indices)
+        )
+        all_support_prototypes, _ = (
+            self._compute_batched_frame_softmax_text_prototypes(
+                support_tokens,
+                support_points,
+                episode_label_text,
+                temporal_point_mask=support_temporal_points,
             )
-            all_support_prototypes, _ = (
-                self._compute_batched_frame_softmax_text_prototypes(
-                    support_tokens,
-                    support_points,
-                    episode_label_text,
-                    temporal_point_mask=support_temporal_points,
-                )
-            )
-        else:
-            all_support_prototypes, _ = (
-                self._compute_batched_frame_softmax_prototypes_from_similarity(
-                    support_tokens,
-                    support_points,
-                    precomputed_similarity.index_select(0, support_indices),
-                )
-            )
+        )
 
         per_class_prototypes = [[] for _ in range(num_labels)]
         for support_local_idx, sample_idx in enumerate(support_indices.tolist()):
@@ -1786,432 +1412,9 @@ class Pointformer(nn.Module):
             valid_classes.to(device=output_device),
         )
 
-    def _sample_dense_cost_at_tracks(self, dense_cost, pred_tracks):
-        """Sample [B,T,K,H,W] dense costs at [B,T,N,2] track coordinates."""
-        if dense_cost.ndim != 5:
-            raise ValueError(
-                "Dense cost must have shape [B,T,K,H,W]; got "
-                f"{tuple(dense_cost.shape)}."
-            )
-        if pred_tracks.ndim != 4 or pred_tracks.shape[-1] != 2:
-            raise ValueError(
-                "pred_tracks must have shape [B,T,N,2]; got "
-                f"{tuple(pred_tracks.shape)}."
-            )
-        batch_size, temporal_dim, num_labels, _, _ = dense_cost.shape
-        if tuple(pred_tracks.shape[:2]) != (batch_size, temporal_dim):
-            raise ValueError(
-                "Dense cost and pred_tracks must share B,T; got "
-                f"{tuple(dense_cost.shape[:2])} and "
-                f"{tuple(pred_tracks.shape[:2])}."
-            )
 
-        model_cfg = getattr(self.cfg, "MODEL", None)
-        sample_mode = str(
-            getattr(model_cfg, "FEAT_EXTRACT_MODE", "nearest")
-        ).lower()
-        # Preserve the exact FP32 pred_tracks coordinates used by the original
-        # dense-feature sampler. Casting the grid to an autocast FP16 cost dtype
-        # can move boundary coordinates into a different nearest patch cell.
-        with torch.autocast(device_type=dense_cost.device.type, enabled=False):
-            dense_cost_bt = rearrange(
-                dense_cost,
-                "b t k h w -> (b t) k h w",
-            ).float()
-            track_grid = rearrange(
-                pred_tracks,
-                "b t n c -> (b t) n 1 c",
-            ).to(device=dense_cost.device, dtype=torch.float32)
-            track_grid = torch.nan_to_num(
-                track_grid,
-                nan=2.0,
-                posinf=2.0,
-                neginf=-2.0,
-            )
-            sampled_cost = F.grid_sample(
-                dense_cost_bt,
-                track_grid,
-                mode=sample_mode,
-                padding_mode="zeros",
-                align_corners=True,
-            ).squeeze(-1)
-        sampled_cost = rearrange(
-            sampled_cost,
-            "(b t) k n -> b k t n",
-            b=batch_size,
-            t=temporal_dim,
-            k=num_labels,
-        )
-        return torch.nan_to_num(
-            sampled_cost,
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
 
-    def _rasterize_point_cost_and_guidance(
-        self,
-        patch_tokens,
-        point_similarity,
-        pred_tracks,
-        point_mask,
-        resolution,
-    ):
-        """Nearest-scatter trajectory costs/features onto their current grid.
 
-        Colliding trajectories are averaged.  Cells receiving no valid
-        trajectory remain exactly zero and are marked false in the returned
-        occupancy mask.
-        """
-        if patch_tokens.ndim != 4:
-            raise ValueError(
-                "patch_tokens must have shape [B,T,N,D]; got "
-                f"{tuple(patch_tokens.shape)}."
-            )
-        if point_similarity.ndim != 4:
-            raise ValueError(
-                "point_similarity must have shape [B,K,T,N]; got "
-                f"{tuple(point_similarity.shape)}."
-            )
-        if pred_tracks.ndim != 4 or pred_tracks.shape[-1] != 2:
-            raise ValueError(
-                "pred_tracks must have shape [B,T,N,2]; got "
-                f"{tuple(pred_tracks.shape)}."
-            )
-        if point_mask.ndim != 3:
-            raise ValueError(
-                "point_mask must have shape [B,T,N]; got "
-                f"{tuple(point_mask.shape)}."
-            )
-        height, width = (int(resolution[0]), int(resolution[1]))
-        if height <= 0 or width <= 0:
-            raise ValueError(f"resolution must be positive, got {resolution}.")
-
-        batch, temporal, num_points, channels = patch_tokens.shape
-        num_labels = point_similarity.shape[1]
-        if tuple(point_similarity.shape) != (
-            batch,
-            num_labels,
-            temporal,
-            num_points,
-        ):
-            raise ValueError("point_similarity does not match patch token B/T/N.")
-        if tuple(pred_tracks.shape[:3]) != (batch, temporal, num_points):
-            raise ValueError("pred_tracks does not match patch token B/T/N.")
-        if tuple(point_mask.shape) != (batch, temporal, num_points):
-            raise ValueError("point_mask does not match patch token B/T/N.")
-
-        device = patch_tokens.device
-        with torch.autocast(device_type=device.type, enabled=False):
-            tokens = torch.nan_to_num(
-                patch_tokens.float(),
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
-            )
-            similarity = torch.nan_to_num(
-                point_similarity.float(),
-                nan=0.0,
-                posinf=1.0,
-                neginf=-1.0,
-            ).clamp(-1.0, 1.0)
-            tracks = pred_tracks.to(device=device, dtype=torch.float32)
-            finite_tracks = torch.isfinite(tracks).all(dim=-1)
-            in_bounds = (
-                tracks.ge(-1.0).all(dim=-1)
-                & tracks.le(1.0).all(dim=-1)
-            )
-            valid = (
-                point_mask.to(device=device).bool()
-                & finite_tracks
-                & in_bounds
-            )
-            safe_tracks = torch.nan_to_num(
-                tracks,
-                nan=0.0,
-                posinf=1.0,
-                neginf=-1.0,
-            ).clamp(-1.0, 1.0)
-            x_index = torch.round(
-                (safe_tracks[..., 0] + 1.0) * 0.5 * max(width - 1, 0)
-            ).long()
-            y_index = torch.round(
-                (safe_tracks[..., 1] + 1.0) * 0.5 * max(height - 1, 0)
-            ).long()
-            flat_index = y_index * width + x_index
-            cells = height * width
-            valid_float = valid.float()
-
-            counts = torch.zeros(
-                batch,
-                temporal,
-                cells,
-                device=device,
-                dtype=torch.float32,
-            ).scatter_add(2, flat_index, valid_float)
-
-            guidance_index = flat_index.unsqueeze(-1).expand(
-                -1, -1, -1, channels
-            )
-            guidance_sum = torch.zeros(
-                batch,
-                temporal,
-                cells,
-                channels,
-                device=device,
-                dtype=torch.float32,
-            ).scatter_add(
-                2,
-                guidance_index,
-                tokens * valid_float.unsqueeze(-1),
-            )
-
-            cost_source = similarity.permute(0, 2, 1, 3)
-            cost_index = flat_index.unsqueeze(2).expand(
-                -1, -1, num_labels, -1
-            )
-            cost_sum = torch.zeros(
-                batch,
-                temporal,
-                num_labels,
-                cells,
-                device=device,
-                dtype=torch.float32,
-            ).scatter_add(
-                3,
-                cost_index,
-                cost_source * valid_float.unsqueeze(2),
-            )
-
-            denominator = counts.clamp_min(1.0)
-            dense_guidance = guidance_sum / denominator.unsqueeze(-1)
-            dense_cost = cost_sum / denominator.unsqueeze(2)
-            occupancy = counts > 0.0
-
-            dense_guidance = dense_guidance.reshape(
-                batch, temporal, height, width, channels
-            )
-            dense_cost = dense_cost.reshape(
-                batch, temporal, num_labels, height, width
-            )
-            occupancy = occupancy.reshape(batch, temporal, height, width)
-        return dense_cost, dense_guidance, occupancy
-
-    def _compute_cat_refined_point_similarity(
-        self,
-        patch_tokens,
-        point_mask,
-        pred_tracks,
-        label_text_features,
-    ):
-        """Replace point cosine with masked CAT cost built from the same tokens."""
-        if patch_tokens is None or pred_tracks is None:
-            raise ValueError(
-                "COST_AGG requires post-Pointformer patch_tokens and pred_tracks."
-            )
-        point_similarity = self._compute_batched_point_text_similarity(
-            patch_tokens,
-            label_text_features,
-        )
-        resolution = self.cat_spatial_cost_aggregator.input_resolution
-        dense_cost, dense_guidance, occupancy = (
-            self._rasterize_point_cost_and_guidance(
-                patch_tokens,
-                point_similarity,
-                pred_tracks,
-                point_mask,
-                resolution,
-            )
-        )
-        refined_dense_cost = (
-            self.cat_spatial_cost_aggregator.forward_precomputed(
-                dense_cost,
-                dense_guidance,
-                occupancy,
-                text_features=label_text_features,
-            )
-        )
-        refined_point_cost = self._sample_dense_cost_at_tracks(
-            refined_dense_cost,
-            pred_tracks,
-        )
-        return torch.nan_to_num(
-            refined_point_cost,
-            nan=0.0,
-            posinf=1e4,
-            neginf=-1e4,
-        )
-
-    def _compute_split_cat_refined_point_similarity(
-        self,
-        patch_tokens,
-        point_mask,
-        pred_tracks,
-        support_mask,
-        episode_positive_labels,
-        episode_class_ids,
-        episode_label_text,
-        raw_positive_labels=None,
-    ):
-        """Apply CAT with separate support/query label information.
-
-        Query samples are refined jointly against every candidate on the
-        episode label axis.  A support sample is instead refined against only
-        its known *global* ground-truth labels.  The refined support costs that
-        overlap the episode axis are then mapped back to their episode slots.
-
-        Importantly, query rows from ``raw_positive_labels`` are never read.
-        They are evaluation targets, not model inputs.  If global labels are
-        unavailable, support samples fall back to their known positive labels
-        on the episode axis.
-        """
-        device = patch_tokens.device
-        batch = patch_tokens.shape[0]
-        support_mask = support_mask.to(device=device).bool().flatten()
-        if support_mask.numel() != batch:
-            raise ValueError(
-                "support_mask must have one entry per sample; got "
-                f"{tuple(support_mask.shape)} for batch size {batch}."
-            )
-
-        episode_class_ids = episode_class_ids.to(
-            device=device,
-            dtype=torch.long,
-        ).flatten()
-        episode_positive_labels = episode_positive_labels.to(
-            device=device,
-        ).bool()
-        expected_positive_shape = (batch, episode_class_ids.numel())
-        if tuple(episode_positive_labels.shape) != expected_positive_shape:
-            raise ValueError(
-                "episode_positive_labels must have shape [B,K]; got "
-                f"{tuple(episode_positive_labels.shape)}, expected "
-                f"{expected_positive_shape}."
-            )
-        if tuple(episode_label_text.shape[:1]) != (
-            episode_class_ids.numel(),
-        ):
-            raise ValueError(
-                "episode label ids/text length mismatch: got "
-                f"{episode_class_ids.numel()} ids and "
-                f"{episode_label_text.shape[0]} text features."
-            )
-
-        support_raw_labels = None
-        if raw_positive_labels is not None:
-            raw_positive_labels = raw_positive_labels.to(device=device).bool()
-            raw_positive_labels = raw_positive_labels.reshape(batch, -1)
-            # Slice only support rows.  Query ground truth must not influence
-            # either its label axis or any class-attention computation.
-            support_indices = torch.nonzero(
-                support_mask,
-                as_tuple=False,
-            ).flatten()
-            support_raw_labels = raw_positive_labels.index_select(
-                0,
-                support_indices,
-            )
-        else:
-            support_indices = torch.nonzero(
-                support_mask,
-                as_tuple=False,
-            ).flatten()
-
-        # Non-positive support/episode slots remain zero and are never consumed
-        # downstream.  In particular, support samples do not even compute a
-        # cost against non-ground-truth episode labels.
-        refined_similarity = torch.zeros(
-            batch,
-            episode_class_ids.numel(),
-            patch_tokens.shape[1],
-            patch_tokens.shape[2],
-            device=device,
-            dtype=torch.float32,
-        )
-
-        query_indices = torch.nonzero(
-            ~support_mask,
-            as_tuple=False,
-        ).flatten()
-        if query_indices.numel() > 0:
-            query_similarity = self._compute_cat_refined_point_similarity(
-                patch_tokens.index_select(0, query_indices),
-                point_mask.index_select(0, query_indices),
-                pred_tracks.index_select(0, query_indices),
-                episode_label_text,
-            )
-            refined_similarity = refined_similarity.index_copy(
-                0,
-                query_indices,
-                query_similarity,
-            )
-
-        for local_support_idx, sample_idx_tensor in enumerate(support_indices):
-            sample_idx = int(sample_idx_tensor.item())
-            positive_episode_indices = torch.nonzero(
-                episode_positive_labels[sample_idx],
-                as_tuple=False,
-            ).flatten()
-            fallback_global_labels = episode_class_ids.index_select(
-                0,
-                positive_episode_indices,
-            )
-
-            if support_raw_labels is None:
-                true_global_labels = fallback_global_labels
-            else:
-                true_global_labels = torch.nonzero(
-                    support_raw_labels[local_support_idx],
-                    as_tuple=False,
-                ).flatten().to(dtype=torch.long)
-                # Metadata should agree, but keep all known episode positives
-                # if a partially populated raw-label vector is supplied.
-                if fallback_global_labels.numel() > 0:
-                    true_global_labels = torch.unique(
-                        torch.cat(
-                            (true_global_labels, fallback_global_labels),
-                            dim=0,
-                        ),
-                        sorted=True,
-                    )
-
-            if true_global_labels.numel() == 0:
-                continue
-
-            true_label_text = self._get_pot_label_text_features(
-                true_global_labels,
-                patch_tokens.dtype,
-            )
-            true_label_similarity = self._compute_cat_refined_point_similarity(
-                patch_tokens[sample_idx : sample_idx + 1],
-                point_mask[sample_idx : sample_idx + 1],
-                pred_tracks[sample_idx : sample_idx + 1],
-                true_label_text,
-            )[0]
-
-            true_axis_indices, episode_axis_indices = torch.nonzero(
-                true_global_labels[:, None] == episode_class_ids[None, :],
-                as_tuple=True,
-            )
-            if episode_axis_indices.numel() == 0:
-                continue
-            sample_similarity = refined_similarity[sample_idx].index_copy(
-                0,
-                episode_axis_indices,
-                true_label_similarity.index_select(0, true_axis_indices),
-            )
-            refined_similarity = refined_similarity.index_copy(
-                0,
-                sample_idx_tensor.reshape(1),
-                sample_similarity.unsqueeze(0),
-            )
-
-        return torch.nan_to_num(
-            refined_similarity,
-            nan=0.0,
-            posinf=1e4,
-            neginf=-1e4,
-        )
 
     def _compute_bidirectional_frame_similarity(
         self,
@@ -2276,35 +1479,18 @@ class Pointformer(nn.Module):
             episode_class_ids,
             value_tokens.dtype,
         )
-        refined_similarity = None
-        if bool(getattr(self, "use_cat_cost_aggregation", False)):
-            refined_similarity = self._compute_split_cat_refined_point_similarity(
-                value_tokens,
-                point_mask,
-                pred_tracks,
-                support_mask,
-                episode_positive_labels,
-                episode_class_ids,
-                episode_label_text,
-                raw_positive_labels=metadata.get("raw_positive_labels"),
-            )
         support_prototypes = self._build_frame_softmax_support_prototypes(
             value_tokens,
             point_mask,
             support_mask,
             episode_positive_labels,
             episode_label_text,
-            precomputed_similarity=refined_similarity,
             temporal_point_mask=temporal_point_mask,
         )
         query_label_features = episode_label_text
         support_visual = None
         support_visual_valid = None
         if bool(getattr(self, "use_support_text_fusion", False)):
-            if refined_similarity is not None:
-                raise RuntimeError(
-                    "SUPPORT_TEXT_FUSION cannot consume CAT precomputed query costs."
-                )
             (
                 query_label_features,
                 support_visual,
@@ -2315,63 +1501,21 @@ class Pointformer(nn.Module):
             )
 
         query_indices = torch.nonzero(query_mask, as_tuple=False).flatten()
-        query_null_weights = []
-        if bool(getattr(self, "use_query_null_route", False)):
-            query_prototypes = []
-            for sample_idx in query_indices.tolist():
-                if refined_similarity is None:
-                    (
-                        sample_prototypes,
-                        _,
-                        sample_null_weights,
-                    ) = self._compute_frame_softmax_query_prototypes_with_null(
-                        value_tokens[sample_idx],
-                        point_mask[sample_idx],
-                        query_label_features,
-                    )
-                else:
-                    (
-                        sample_prototypes,
-                        _,
-                        sample_null_weights,
-                    ) = (
-                        self
-                        ._compute_frame_softmax_query_prototypes_with_null_from_similarity(
-                            value_tokens[sample_idx],
-                            point_mask[sample_idx],
-                            refined_similarity[sample_idx],
-                        )
-                    )
-                query_null_weights.append(sample_null_weights.unsqueeze(0))
-                query_prototypes.append(sample_prototypes.unsqueeze(0))
-            if not query_prototypes:
-                return None
-            query_prototypes = torch.cat(query_prototypes, dim=0)
-        else:
-            query_tokens = value_tokens.index_select(0, query_indices)
-            query_points = point_mask.index_select(0, query_indices)
-            if refined_similarity is None:
-                query_temporal_points = (
-                    None
-                    if temporal_point_mask is None
-                    else temporal_point_mask.index_select(0, query_indices)
-                )
-                query_prototypes, _ = (
-                    self._compute_batched_frame_softmax_text_prototypes(
-                        query_tokens,
-                        query_points,
-                        query_label_features,
-                        temporal_point_mask=query_temporal_points,
-                    )
-                )
-            else:
-                query_prototypes, _ = (
-                    self._compute_batched_frame_softmax_prototypes_from_similarity(
-                        query_tokens,
-                        query_points,
-                        refined_similarity.index_select(0, query_indices),
-                    )
-                )
+        query_tokens = value_tokens.index_select(0, query_indices)
+        query_points = point_mask.index_select(0, query_indices)
+        query_temporal_points = (
+            None
+            if temporal_point_mask is None
+            else temporal_point_mask.index_select(0, query_indices)
+        )
+        query_prototypes, _ = (
+            self._compute_batched_frame_softmax_text_prototypes(
+                query_tokens,
+                query_points,
+                query_label_features,
+                temporal_point_mask=query_temporal_points,
+            )
+        )
 
         diag_similarity = self._compute_bidirectional_frame_similarity(
             query_prototypes,
@@ -2428,33 +1572,6 @@ class Pointformer(nn.Module):
             ),
             "query_partial_target_label_indices": target_label_indices,
         }
-        if bool(getattr(self, "use_query_null_route", False)):
-            query_null_weights = torch.cat(query_null_weights, dim=0)
-            null_ortho_loss = self._compute_query_null_orthogonal_loss(
-                support_prototypes,
-            )
-            (
-                support_mean_abs_cosine,
-                support_max_abs_cosine,
-            ) = self._compute_query_null_support_cosine_stats(
-                support_prototypes,
-            )
-            result.update({
-                "query_null_weights": query_null_weights.to(
-                    device=value_tokens.device,
-                    dtype=torch.float32,
-                ),
-                "query_null_score": self._get_query_null_score().to(
-                    device=value_tokens.device,
-                ),
-                "query_null_orthogonal_loss": null_ortho_loss,
-                "query_null_support_mean_abs_cosine": (
-                    support_mean_abs_cosine
-                ),
-                "query_null_support_max_abs_cosine": (
-                    support_max_abs_cosine
-                ),
-            })
         if support_visual is not None:
             result.update({
                 "support_text_fusion_query_features": query_label_features.to(
@@ -2715,15 +1832,13 @@ class Pointformer(nn.Module):
             matchability_source = str(
                 getattr(match_cfg, "EVIDENCE_SOURCE", "post")
             ).lower()
-            absolute_mass_enabled = bool(
-                getattr(match_cfg, "ABSOLUTE_MASS_ENABLE", False)
-            )
+            judgments = resolve_query_judgments(match_cfg)
             absolute_mass_source = str(
                 getattr(match_cfg, "ABSOLUTE_MASS_SOURCE", "raw")
             ).lower()
             raw_evidence_requested = (
-                matchability_source == "raw"
-                or (absolute_mass_enabled and absolute_mass_source == "raw")
+                (judgments.uniqueness and matchability_source == "raw")
+                or (judgments.quality and absolute_mass_source == "raw")
             )
             if (
                 bool(getattr(match_cfg, "ENABLE", False))

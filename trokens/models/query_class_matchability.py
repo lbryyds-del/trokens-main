@@ -1,7 +1,6 @@
 """Query-class matchability for multi-label few-shot action recognition.
 
-This extension separates two questions that were coupled by the previous
-Query Null token:
+This extension separates routing, specificity and absolute quality:
 
 1. ``where``: the text/support-routed Softmax constructs the class-conditioned
    Query frame prototype, optionally refined by a bounded per-patch
@@ -14,9 +13,11 @@ Query Null token:
    mass ``1-m``.  The unmatched mass is retained by BiMHM instead of being
    normalized back onto arbitrary patches.
 
-The matchability is calibrated from labeled Support videos in the current
-episode and enters the final q2s logit as a non-positive log-probability
-penalty. No Query target is consumed by this module.
+The final correction uses the target mass g=m*rho in BiMHM. Global
+matchability is diagnostic only, never an additional log-probability penalty.
+QUALITY_ENABLE and UNIQUENESS_ENABLE independently gate these judgments;
+neither disables the base text/Support or temporal route. No Query target is
+consumed by this module.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ from __future__ import annotations
 from typing import Any, Dict, Optional, Tuple
 
 import torch
+
+from trokens.config.query_judgments import resolve_query_judgments
 
 
 _PATCH_MARKER = "_query_class_matchability_original_builder"
@@ -510,6 +513,7 @@ def build_class_local_support_references(
     episode_positive_labels: torch.Tensor,
     query_label_features: torch.Tensor,
     temporal_point_mask: Optional[torch.Tensor] = None,
+    precomputed_prototypes: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build one routed reference for every Support/class pair.
 
@@ -519,9 +523,12 @@ def build_class_local_support_references(
     Support frames cannot win a later temporal max merely because their zero
     prototype is larger than a negative cosine.
 
-    Returns ``(references, frame_valid, positive_valid, confuser_valid,
-    support_indices)`` where references are ``[S,K,T,D]``, frame validity is
-    ``[S,K,T]`` and the two class masks are ``[S,K]``.
+    ``precomputed_prototypes`` may provide the already routed full episode as
+    ``[B,K,T,D]`` so the Support references and Query prototypes can share one
+    batched temporal-routing call. Returns ``(references, frame_valid,
+    positive_valid, confuser_valid, support_indices)`` where references are
+    ``[S,K,T,D]``, frame validity is ``[S,K,T]`` and the two class masks are
+    ``[S,K]``.
     """
     if value_tokens.ndim != 4:
         raise ValueError(
@@ -558,6 +565,19 @@ def build_class_local_support_references(
             "query_label_features must have shape [K,D] matching values; got "
             f"{tuple(query_label_features.shape)} and D={feat_dim}."
         )
+    if precomputed_prototypes is not None:
+        expected_prototype_shape = (
+            batch,
+            num_classes,
+            temporal_dim,
+            feat_dim,
+        )
+        if tuple(precomputed_prototypes.shape) != expected_prototype_shape:
+            raise ValueError(
+                "precomputed_prototypes must have shape [B,K,T,D]; got "
+                f"{tuple(precomputed_prototypes.shape)}, expected "
+                f"{expected_prototype_shape}."
+            )
 
     route_point_mask = route_point_mask.to(device=value_tokens.device).bool()
     support_frame_mask = support_frame_mask.to(device=value_tokens.device).bool()
@@ -592,14 +612,17 @@ def build_class_local_support_references(
     positive_rows = []
     confuser_rows = []
     for sample_idx in support_indices.tolist():
-        sample_proto, _ = pointformer._compute_frame_softmax_text_prototypes(
-            value_tokens[sample_idx],
-            route_point_mask[sample_idx],
-            query_label_features,
-            **({} if temporal_point_mask is None else {
-                "temporal_point_mask": temporal_point_mask[sample_idx],
-            }),
-        )
+        if precomputed_prototypes is None:
+            sample_proto, _ = pointformer._compute_frame_softmax_text_prototypes(
+                value_tokens[sample_idx],
+                route_point_mask[sample_idx],
+                query_label_features,
+                **({} if temporal_point_mask is None else {
+                    "temporal_point_mask": temporal_point_mask[sample_idx],
+                }),
+            )
+        else:
+            sample_proto = precomputed_prototypes[sample_idx]
         sample_proto = torch.nan_to_num(
             sample_proto,
             nan=0.0,
@@ -1635,11 +1658,6 @@ def _build_frame_softmax_q2s_with_matchability(
     if not bool(_cfg_value(cfg, "ENABLE", False)):
         original = getattr(self.__class__, _PATCH_MARKER)
         return original(self, value_tokens, metadata, pred_tracks=pred_tracks)
-    if bool(getattr(self, "use_query_null_route", False)):
-        raise RuntimeError(
-            "QUERY_CLASS_MATCHABILITY and QUERY_NULL_ROUTE are mutually "
-            "exclusive. Disable the learned Query Null token."
-        )
 
     support_mask = metadata["support_mask"].to(device=value_tokens.device).bool()
     query_mask = ~support_mask
@@ -1674,8 +1692,9 @@ def _build_frame_softmax_q2s_with_matchability(
         value_tokens.dtype,
     )
 
+    judgments = resolve_query_judgments(cfg)
     evidence_source = str(_cfg_value(cfg, "EVIDENCE_SOURCE", "post")).lower()
-    if evidence_source == "post":
+    if not judgments.uniqueness or evidence_source == "post":
         evidence_tokens = value_tokens
     elif evidence_source == "raw":
         if matchability_evidence_tokens is None:
@@ -1695,18 +1714,6 @@ def _build_frame_softmax_q2s_with_matchability(
             f"{tuple(evidence_tokens.shape)} and {tuple(value_tokens.shape)}."
         )
 
-    refined_similarity = None
-    if bool(getattr(self, "use_cat_cost_aggregation", False)):
-        refined_similarity = self._compute_split_cat_refined_point_similarity(
-            value_tokens,
-            point_mask,
-            pred_tracks,
-            support_mask,
-            episode_positive_labels,
-            episode_class_ids,
-            episode_label_text,
-            raw_positive_labels=metadata.get("raw_positive_labels"),
-        )
 
     support_prototypes = self._build_frame_softmax_support_prototypes(
         value_tokens,
@@ -1714,7 +1721,6 @@ def _build_frame_softmax_q2s_with_matchability(
         support_mask,
         episode_positive_labels,
         episode_label_text,
-        precomputed_similarity=refined_similarity,
         temporal_point_mask=temporal_point_mask,
     )
 
@@ -1723,10 +1729,6 @@ def _build_frame_softmax_q2s_with_matchability(
     support_visual = None
     support_visual_valid = None
     if bool(getattr(self, "use_support_text_fusion", False)):
-        if refined_similarity is not None:
-            raise RuntimeError(
-                "SUPPORT_TEXT_FUSION cannot consume CAT precomputed query costs."
-            )
         (
             query_label_features,
             support_visual,
@@ -1768,16 +1770,13 @@ def _build_frame_softmax_q2s_with_matchability(
     routed_positive_valid = None
     routed_confuser_valid = None
     routed_support_indices = None
+    shared_route_prototypes = None
+    shared_route_weights = None
 
-    local_refinement_enable = bool(
-        _cfg_value(cfg, "LOCAL_REFINEMENT_ENABLE", False)
-    )
-    evidence_verification_enable = bool(
-        _cfg_value(cfg, "EVIDENCE_VERIFICATION_ENABLE", False)
-    )
-    absolute_mass_enable = bool(
-        _cfg_value(cfg, "ABSOLUTE_MASS_ENABLE", False)
-    )
+    uniqueness_enable = judgments.uniqueness
+    local_refinement_enable = judgments.local_refinement
+    evidence_verification_enable = judgments.frame_verification
+    absolute_mass_enable = judgments.quality
     absolute_mass_source = str(
         _cfg_value(cfg, "ABSOLUTE_MASS_SOURCE", "raw")
     ).lower()
@@ -1800,6 +1799,19 @@ def _build_frame_softmax_q2s_with_matchability(
             "LOCAL_REFINEMENT_ENABLE and EVIDENCE_VERIFICATION_ENABLE are "
             "controlled alternatives and cannot be enabled together."
         )
+    # Once Text+Support fusion is available, Query routing and the Support
+    # Positive/Confuser references use the same label features. Route the
+    # complete episode once and split it below instead of invoking the shared
+    # temporal refiner separately for Query and every Support reference.
+    if evidence_verification_enable:
+        shared_route_prototypes, shared_route_weights = (
+            self._compute_batched_frame_softmax_text_prototypes(
+                value_tokens,
+                point_mask,
+                query_label_features,
+                temporal_point_mask=temporal_point_mask,
+            )
+        )
     if local_refinement_enable or evidence_verification_enable:
         if matchability_mode not in relative_modes:
             raise ValueError(
@@ -1809,11 +1821,6 @@ def _build_frame_softmax_q2s_with_matchability(
         if local_refinement_enable and evidence_source != "post":
             raise ValueError(
                 "LOCAL_REFINEMENT_ENABLE currently requires EVIDENCE_SOURCE='post'."
-            )
-        if refined_similarity is not None:
-            raise RuntimeError(
-                "Local Positive/Confuser evidence currently requires "
-                "COST_AGG.ENABLE=False."
             )
         support_frame_mask = metadata.get("pred_visibility", point_mask).to(
             device=value_tokens.device,
@@ -1833,6 +1840,7 @@ def _build_frame_softmax_q2s_with_matchability(
             episode_positive_labels,
             query_label_features,
             temporal_point_mask=temporal_point_mask,
+            precomputed_prototypes=shared_route_prototypes,
         )
         (
             local_margin,
@@ -1932,7 +1940,16 @@ def _build_frame_softmax_q2s_with_matchability(
         base_query_prototypes = local_refinement["base_prototypes"]
         query_patch_weights = local_refinement["refined_weights"]
     else:
-        if refined_similarity is None:
+        if shared_route_prototypes is not None:
+            query_prototypes = shared_route_prototypes.index_select(
+                0,
+                query_indices,
+            )
+            query_patch_weights = shared_route_weights.index_select(
+                0,
+                query_indices,
+            )
+        else:
             query_temporal_point_mask = (
                 None
                 if temporal_point_mask is None
@@ -1944,14 +1961,6 @@ def _build_frame_softmax_q2s_with_matchability(
                     query_point_mask,
                     query_label_features,
                     temporal_point_mask=query_temporal_point_mask,
-                )
-            )
-        else:
-            query_prototypes, query_patch_weights = (
-                self._compute_batched_frame_softmax_prototypes_from_similarity(
-                    query_tokens,
-                    query_point_mask,
-                    refined_similarity.index_select(0, query_indices),
                 )
             )
         base_query_prototypes = query_prototypes
@@ -2116,21 +2125,35 @@ def _build_frame_softmax_q2s_with_matchability(
         )
         temporal_logits = temporal_match_aux["logits"]
 
-    if matchability_mode in relative_modes:
+    if not uniqueness_enable:
+        # No Positive/Confuser or threshold diagnostic pass when disabled.
+        # Neutral values keep existing logging consumers compatible.
+        matchability_aux = {
+            "matchability": torch.ones_like(diag_similarity),
+            "query_evidence": torch.zeros_like(diag_similarity),
+            "threshold": diag_similarity.new_zeros(episode_class_ids.numel()),
+            "support_reliable": torch.zeros(
+                episode_class_ids.numel(), device=value_tokens.device,
+                dtype=torch.bool,
+            ),
+            "relative_margin": torch.zeros_like(diag_similarity),
+            "positive_similarity": diag_similarity,
+            "negative_similarity": torch.zeros_like(diag_similarity),
+            "hardest_confuser_index": torch.full_like(
+                diag_similarity, -1, dtype=torch.long,
+            ),
+            "confuser_valid_count": torch.zeros(
+                episode_class_ids.numel(), device=value_tokens.device,
+                dtype=torch.long,
+            ),
+        }
+    elif matchability_mode in relative_modes:
         if evidence_source != "post":
             raise ValueError(
                 "positive_confuser_margin currently compares Post-Pointformer "
                 "prototypes; set EVIDENCE_SOURCE='post'."
             )
-        # The current CAT path intentionally computes Support costs only for
-        # known positive labels.  Reusing those zero-filled non-positive slots
-        # as confusers would make the two sides incomparable, so fail loudly
-        # until a CAT-specific negative route is defined.
-        if refined_similarity is not None:
-            raise RuntimeError(
-                "positive_confuser_margin currently requires COST_AGG.ENABLE=False."
-            )
-        if routed_support_references is None or not local_refinement_enable:
+        if routed_support_references is None:
             confuser_prototypes, confuser_valid, confuser_support_indices = (
                 build_class_confuser_prototypes(
                     self,
@@ -2146,14 +2169,28 @@ def _build_frame_softmax_q2s_with_matchability(
                 )
             )
         else:
-            # The local and global comparisons must use the same class-routed
-            # Support hypotheses.  Reusing them also avoids a second complete
-            # Support routing pass when local refinement is enabled.
+            # Local/frame and global comparisons use the same class-routed
+            # Support hypotheses. Reusing them avoids a second complete
+            # Support routing pass.
             confuser_prototypes = routed_support_references
             if bool(_cfg_value(cfg, "DETACH_CONFUSER_SUPPORT", False)):
                 confuser_prototypes = confuser_prototypes.detach()
-            confuser_valid = routed_confuser_valid
             confuser_support_indices = routed_support_indices
+            if local_refinement_enable:
+                confuser_valid = routed_confuser_valid
+            else:
+                # Preserve the original global-confuser validity rule. The
+                # frame verifier additionally requires observed Support frames,
+                # whereas the global diagnostic only requires a non-zero
+                # routed prototype for that Support/class pair.
+                confuser_labels = episode_positive_labels.index_select(
+                    0,
+                    confuser_support_indices,
+                )
+                confuser_has_prototype = confuser_prototypes.float().norm(
+                    dim=-1,
+                ).gt(1e-12).any(dim=-1)
+                confuser_valid = (~confuser_labels) & confuser_has_prototype
         negative_similarity = pairwise_bimhm(
             query_prototypes,
             confuser_prototypes,

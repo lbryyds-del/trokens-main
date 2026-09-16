@@ -76,6 +76,7 @@ def _dual_loss_cfg(
                 EVIDENCE_VIDEO_TOPK_FRAMES=3,
                 EVIDENCE_MIL_TEMPERATURE=0.10,
                 EVIDENCE_MIL_LOSS_WEIGHT=evidence_mil_weight,
+                EVIDENCE_VERIFICATION_ENABLE=True,
             )
         ),
     )

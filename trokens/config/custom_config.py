@@ -35,25 +35,6 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.TEXT_WEIGHT = 1.0
     cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.VISUAL_WEIGHT = 1.0
     cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.VISUAL_DETACH = True
-    cfg.FEW_SHOT.COST_AGG = CfgNode()
-    cfg.FEW_SHOT.COST_AGG.ENABLE = False
-    cfg.FEW_SHOT.COST_AGG.COST_DIM = 32
-    cfg.FEW_SHOT.COST_AGG.GUIDANCE_DIM = 32
-    cfg.FEW_SHOT.COST_AGG.NUM_HEADS = 4
-    cfg.FEW_SHOT.COST_AGG.WINDOW_SIZE = 4
-    cfg.FEW_SHOT.COST_AGG.NUM_LAYERS = 1
-    cfg.FEW_SHOT.COST_AGG.MLP_RATIO = 4.0
-    cfg.FEW_SHOT.COST_AGG.ATTN_DROPOUT = 0.0
-    cfg.FEW_SHOT.COST_AGG.PROJ_DROPOUT = 0.0
-    cfg.FEW_SHOT.COST_AGG.CLASS_AGG = CfgNode()
-    cfg.FEW_SHOT.COST_AGG.CLASS_AGG.ENABLE = False
-    cfg.FEW_SHOT.COST_AGG.CLASS_AGG.GUIDANCE_DIM = 32
-    cfg.FEW_SHOT.COST_AGG.CLASS_AGG.NUM_HEADS = 4
-    cfg.FEW_SHOT.COST_AGG.CLASS_AGG.ATTENTION_TYPE = "full"
-    cfg.FEW_SHOT.COST_AGG.CLASS_AGG.POOLING_SIZE = 1
-    cfg.FEW_SHOT.COST_AGG.CLASS_AGG.PAD_LEN = 0
-    cfg.FEW_SHOT.COST_AGG.CLASS_AGG.MLP_RATIO = 4.0
-    cfg.FEW_SHOT.COST_AGG.CLASS_AGG.GATE_INIT = 0.0
     cfg.FEW_SHOT.TEXT_ALIGN = CfgNode()
     cfg.FEW_SHOT.TEXT_ALIGN.ENABLE = False
     cfg.FEW_SHOT.TEXT_ALIGN.LOSS_WEIGHT = 0.1
@@ -75,23 +56,14 @@ def add_custom_config(cfg):
     # Optional visibility input channel; invalid observations are always masked.
     cfg.FEW_SHOT.POT_ROUTE.TEMPORAL_REFINEMENT.USE_VISIBILITY = True
 
-    # Legacy 8.63 learned Null-token route, retained for ablation only.
-    cfg.FEW_SHOT.QUERY_NULL_ROUTE = CfgNode()
-    cfg.FEW_SHOT.QUERY_NULL_ROUTE.ENABLE = False
-    cfg.FEW_SHOT.QUERY_NULL_ROUTE.SCORE_INIT = 0.07
-    cfg.FEW_SHOT.QUERY_NULL_ROUTE.SCORE_MIN = -0.20
-    cfg.FEW_SHOT.QUERY_NULL_ROUTE.SCORE_MAX = 0.80
-    cfg.FEW_SHOT.QUERY_NULL_ROUTE.CARDINALITY_CORRECTION = True
-    cfg.FEW_SHOT.QUERY_NULL_ROUTE.TOKEN_INIT_STD = 0.02
-    cfg.FEW_SHOT.QUERY_NULL_ROUTE.VALUE_SCALE = 1.0
-    cfg.FEW_SHOT.QUERY_NULL_ROUTE.DETACH_FRAME_SCALE = True
-    cfg.FEW_SHOT.QUERY_NULL_ROUTE.ORTHO_WEIGHT = 0.01
-    cfg.FEW_SHOT.QUERY_NULL_ROUTE.ORTHO_DETACH_SUPPORT = True
 
     # Query-class matchability: pure text evidence estimates whether a Query
     # candidate should be trusted; text+Support routing still determines where.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY = CfgNode()
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE = False
+    # Independent master switches; True preserves older config behavior.
+    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.QUALITY_ENABLE = True
+    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.UNIQUENESS_ENABLE = True
     # ``threshold`` preserves the 8.64 scalar Support-calibration route;
     # SAV's experiment config selects ``positive_confuser_margin``.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.MODE = "threshold"

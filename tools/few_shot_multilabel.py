@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from sklearn.metrics import average_precision_score
 
 import trokens.utils.distributed as du
+from trokens.config.query_judgments import resolve_query_judgments
 
 
 def q2s_cos_sim_fp32(x, y, epsilon=0.01):
@@ -319,6 +320,8 @@ def compute_query_partial_q2s_loss(
         raise ValueError(
             "EVIDENCE_MIL_LOSS_WEIGHT must be finite and non-negative."
         )
+    if not resolve_query_judgments(match_cfg).frame_verification:
+        evidence_mil_weight = 0.0
 
     evidence_mil = None
     if evidence_mil_weight > 0.0:
@@ -419,129 +422,10 @@ def get_text_align_loss(few_shot_aux, ref_tensor):
     return ref_tensor.new_zeros(())
 
 
-def get_query_null_orthogonal_loss(few_shot_aux, ref_tensor):
-    """Return the A2 Null orthogonal loss or an FP32 zero scalar."""
-    if (
-        isinstance(few_shot_aux, dict)
-        and "query_null_orthogonal_loss" in few_shot_aux
-    ):
-        null_ortho_loss = few_shot_aux["query_null_orthogonal_loss"]
-        if not isinstance(null_ortho_loss, torch.Tensor):
-            null_ortho_loss = ref_tensor.new_tensor(
-                float(null_ortho_loss),
-                dtype=torch.float32,
-            )
-        return torch.nan_to_num(
-            null_ortho_loss.float(),
-            nan=0.0,
-            posinf=1e4,
-            neginf=0.0,
-        )
-    return ref_tensor.new_zeros((), dtype=torch.float32)
 
 
-def _query_null_aux_scalar(few_shot_aux, key, reference):
-    """Read one finite scalar diagnostic on ``reference``'s device."""
-    value = few_shot_aux.get(key, 0.0)
-    if isinstance(value, torch.Tensor):
-        if value.numel() != 1:
-            raise ValueError(
-                f"{key} must be a scalar; got shape {tuple(value.shape)}."
-            )
-        value = value.to(device=reference.device).float().reshape(())
-    else:
-        value = reference.new_tensor(float(value))
-    return torch.nan_to_num(value, nan=0.0, posinf=1e4, neginf=-1e4)
 
 
-def get_query_null_route_metrics(few_shot_aux, q2s_labels):
-    """Compute label-stratified A2 mechanism diagnostics for one episode batch."""
-    if (
-        not isinstance(few_shot_aux, dict)
-        or "query_null_weights" not in few_shot_aux
-    ):
-        return {}
-
-    null_weights = few_shot_aux["query_null_weights"]
-    if not isinstance(null_weights, torch.Tensor) or null_weights.ndim != 3:
-        shape = (
-            tuple(null_weights.shape)
-            if isinstance(null_weights, torch.Tensor)
-            else type(null_weights).__name__
-        )
-        raise ValueError(
-            "query_null_weights must be a tensor with shape [Q,K,T]; "
-            f"got {shape}."
-        )
-    video_null = torch.nan_to_num(
-        null_weights.float(),
-        nan=0.0,
-        posinf=1.0,
-        neginf=0.0,
-    ).clamp(0.0, 1.0).mean(dim=-1)
-    labels = q2s_labels.to(device=video_null.device).float()
-    if tuple(labels.shape) != tuple(video_null.shape):
-        raise ValueError(
-            "q2s_labels must match Query Null video weights [Q,K]; got "
-            f"{tuple(labels.shape)} versus {tuple(video_null.shape)}."
-        )
-    positive_mask = labels > 0.5
-    negative_mask = ~positive_mask
-
-    def masked_mean(value, mask):
-        selected = value[mask]
-        if selected.numel() == 0:
-            return value.new_zeros(())
-        return selected.mean()
-
-    positive_null_mean = masked_mean(video_null, positive_mask)
-    negative_null_mean = masked_mean(video_null, negative_mask)
-    diag_similarity = few_shot_aux.get("query_partial_diag_similarity")
-    if isinstance(diag_similarity, torch.Tensor):
-        diag_similarity = torch.nan_to_num(
-            diag_similarity.to(device=video_null.device).float(),
-            nan=0.0,
-            posinf=1.0,
-            neginf=-1.0,
-        )
-        if tuple(diag_similarity.shape) != tuple(video_null.shape):
-            raise ValueError(
-                "query_partial_diag_similarity must match [Q,K]; got "
-                f"{tuple(diag_similarity.shape)} versus "
-                f"{tuple(video_null.shape)}."
-            )
-    else:
-        diag_similarity = torch.zeros_like(video_null)
-
-    metrics = {
-        "query_null_score": _query_null_aux_scalar(
-            few_shot_aux,
-            "query_null_score",
-            video_null,
-        ),
-        "positive_null_mean": positive_null_mean,
-        "negative_null_mean": negative_null_mean,
-        "null_gap": negative_null_mean - positive_null_mean,
-        "null_support_mean_abs_cosine": _query_null_aux_scalar(
-            few_shot_aux,
-            "query_null_support_mean_abs_cosine",
-            video_null,
-        ),
-        "null_support_max_abs_cosine": _query_null_aux_scalar(
-            few_shot_aux,
-            "query_null_support_max_abs_cosine",
-            video_null,
-        ),
-        "positive_diag_similarity": masked_mean(
-            diag_similarity,
-            positive_mask,
-        ),
-        "negative_diag_similarity": masked_mean(
-            diag_similarity,
-            negative_mask,
-        ),
-    }
-    return {key: value.detach() for key, value in metrics.items()}
 
 
 def get_query_matchability_metrics(few_shot_aux, q2s_labels):
