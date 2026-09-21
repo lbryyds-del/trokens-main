@@ -5,6 +5,7 @@ import os
 import pprint
 import sys
 import warnings
+from contextlib import nullcontext
 from datetime import datetime
 import numpy as np
 import torch
@@ -263,6 +264,22 @@ def train_epoch(
     model.train()
     train_meter.iter_tic()
     data_size = len(train_loader)
+    grad_accum_steps = int(getattr(cfg.SOLVER, "GRAD_ACCUM_STEPS", 1))
+    if grad_accum_steps < 1:
+        raise ValueError("SOLVER.GRAD_ACCUM_STEPS must be >= 1.")
+    if du.is_master_proc():
+        logger.info(
+            "Gradient accumulation: %d episode(s) per rank/update, "
+            "%d global episode(s)/update, %d optimizer update(s)/epoch.",
+            grad_accum_steps,
+            grad_accum_steps * max(du.get_world_size(), 1),
+            (data_size + grad_accum_steps - 1) // grad_accum_steps,
+        )
+
+    # The few-shot loader yields one complete episode per iteration.  Keep
+    # gradients across micro-episodes so that a two-GPU run can retain the
+    # four-episode global update used by the previous four-GPU run.
+    optimizer.zero_grad(set_to_none=True)
 
     epoch_top_1_err = []
     epoch_top_5_err = []
@@ -291,6 +308,12 @@ def train_epoch(
     for cur_iter, (inputs, labels, _vid_idx, meta) in enumerate(train_loader):
         if cur_iter > len(train_loader):
             break
+        group_start = (cur_iter // grad_accum_steps) * grad_accum_steps
+        group_end = min(group_start + grad_accum_steps, data_size)
+        group_size = group_end - group_start
+        is_update_step = (cur_iter + 1) == group_end
+        if cur_iter == group_start:
+            optimizer.zero_grad(set_to_none=True)
         # Transfer the data to the current GPU device.
         if cfg.NUM_GPUS:
             inputs, labels, meta = misc.iter_to_cuda([inputs, labels, meta])
@@ -302,6 +325,12 @@ def train_epoch(
             samples, labels = mixup_fn(inputs[0], labels)
             inputs[0] = samples
 
+        # DDP decides whether to install gradient-reduction hooks during the
+        # forward pass, so no_sync must cover both forward and backward.
+        sync_context = nullcontext()
+        if cfg.NUM_GPUS > 1 and not is_update_step and hasattr(model, "no_sync"):
+            sync_context = model.no_sync()
+        sync_context.__enter__()
 
         query_route_metrics = {}
         with autocast_context(cfg.TRAIN.MIXED_PRECISION):
@@ -415,30 +444,37 @@ def train_epoch(
                 cur_iter + 1,
                 finite_report,
             )
+            sync_context.__exit__(None, None, None)
             optimizer.zero_grad(set_to_none=True)
             if progress_bar is not None:
                 progress_bar.update(1)
                 progress_bar.set_postfix({"skip": "nan"}, refresh=False)
             train_meter.iter_tic()
             continue
-        # Perform the backward pass.
-        optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        # Unscales the gradients of optimizer's assigned params in-place
-        scaler.unscale_(optimizer)
-        # Clip gradients if necessary
-        if cfg.SOLVER.CLIP_GRAD_VAL:
-            torch.nn.utils.clip_grad_value_(
-                model.parameters(), cfg.SOLVER.CLIP_GRAD_VAL
-            )
-        elif cfg.SOLVER.CLIP_GRAD_L2NORM:
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(), cfg.SOLVER.CLIP_GRAD_L2NORM
-            )
+        # Perform the backward pass.  DDP synchronizes on the final
+        # micro-step; earlier micro-steps accumulate locally.  Dividing by
+        # the group size keeps the resulting gradient an average rather than
+        # a sum, matching the original larger global episode batch.
+        scaler.scale(loss / group_size).backward()
+        sync_context.__exit__(None, None, None)
 
-        # Update the parameters.
-        scaler.step(optimizer)
-        scaler.update()
+        if is_update_step:
+            # Unscale and clip only once, after the complete accumulated
+            # gradient is available.
+            scaler.unscale_(optimizer)
+            if cfg.SOLVER.CLIP_GRAD_VAL:
+                torch.nn.utils.clip_grad_value_(
+                    model.parameters(), cfg.SOLVER.CLIP_GRAD_VAL
+                )
+            elif cfg.SOLVER.CLIP_GRAD_L2NORM:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), cfg.SOLVER.CLIP_GRAD_L2NORM
+                )
+
+            # Update the parameters only at the accumulation boundary.
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
         top1_err, top5_err = None, None
         classification_loss = loss_dict['classfication_loss']
         q2s_loss = loss_dict['q2s_loss']

@@ -370,9 +370,27 @@ def test_enabled_full_route_backward_reaches_shared_refiner():
         assert param.grad.abs().sum() > 0, name
 
 
-def test_default_off_sav_on_registration_rng_and_checkpoint_roundtrip():
+def test_temporal_refinement_is_disabled_by_default():
     assert not get_cfg().FEW_SHOT.POT_ROUTE.TEMPORAL_REFINEMENT.ENABLE
-    assert _sav_cfg().FEW_SHOT.POT_ROUTE.TEMPORAL_REFINEMENT.ENABLE
+
+
+@pytest.mark.parametrize("enable", [False, True], ids=["disabled", "enabled"])
+def test_explicit_temporal_switch_controls_registration_and_preserves_rng(enable):
+    # The test selects its own branch, independent of the active SAV experiment.
+    before = torch.random.get_rng_state().clone()
+    model = _model(enable=enable)
+    assert torch.equal(before, torch.random.get_rng_state())
+    assert model.use_temporal_similarity_refinement is enable
+    if enable:
+        assert isinstance(model.temporal_similarity_refiner, TrajectoryTemporalSimilarityRefiner)
+        assert model.state_dict()
+        assert all(key.startswith("temporal_similarity_refiner.") for key in model.state_dict())
+    else:
+        assert model.temporal_similarity_refiner is None
+        assert not model.state_dict()
+
+
+def test_temporal_registration_rng_and_checkpoint_roundtrip():
     model = _model(enable=False)
     assert model.temporal_similarity_refiner is None and not model.state_dict()
     model.pot_route_cfg.TEMPORAL_REFINEMENT.ENABLE = True

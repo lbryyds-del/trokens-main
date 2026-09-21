@@ -30,6 +30,10 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.TRAIN_OG_EPISODES = False
     cfg.FEW_SHOT.CLASS_LOSS_LAMBDA = 1.0
     cfg.FEW_SHOT.Q2S_LOSS_LAMBDA = 1.0
+    # Number of per-rank episode micro-steps accumulated before one optimizer
+    # update.  The SAV two-GPU experiment overrides this to 2 so that its
+    # effective global episode batch matches the previous four-GPU run.
+    cfg.SOLVER.GRAD_ACCUM_STEPS = 1
     cfg.FEW_SHOT.SUPPORT_TEXT_FUSION = CfgNode()
     cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.ENABLE = False
     cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.TEXT_WEIGHT = 1.0

@@ -4,7 +4,7 @@ OUTPUT_DIR: output/sav
 
 FEW_SHOT:
   N_WAY: 5
-  K_SHOT: 5
+  K_SHOT: 1
   TRAIN_QUERY_PER_CLASS: 6
   TEST_QUERY_PER_CLASS: 1
   TRAIN_EPISODES: 2000
@@ -21,7 +21,7 @@ FEW_SHOT:
     ENABLE: True
     FRAME_SOFTMAX_TAU: 0.04
     TEMPORAL_REFINEMENT:
-      ENABLE: True
+      ENABLE: False
       TYPE: lite_tcn_3ch_v1
       HIDDEN_DIM: 16
       KERNEL_SIZE: 3
@@ -37,8 +37,8 @@ FEW_SHOT:
     ENABLE: True
     # Only toggle these two flags for quality / uniqueness ablations.
     # Query routing and temporal refinement remain enabled independently.
-    QUALITY_ENABLE: False
-    UNIQUENESS_ENABLE: False
+    QUALITY_ENABLE: True
+    UNIQUENESS_ENABLE: True
     # Algorithm choice, not an on/off switch; toggling flags does not change it.
     MODE: "positive_confuser_margin"
     # Legacy threshold-mode evidence (kept for R1 rollback/comparison).
@@ -171,6 +171,9 @@ AUG:
 
 SOLVER:
   BASE_LR: 0.0001
+  # Two GPUs accumulate two episode micro-steps to match the former
+  # four-GPU effective global episode batch (4 episodes per update).
+  GRAD_ACCUM_STEPS: 2
   LR_POLICY: cosine
   COSINE_AFTER_WARMUP: True
   COSINE_END_LR: 0.000001
