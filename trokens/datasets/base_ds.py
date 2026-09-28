@@ -15,7 +15,7 @@ from .build import DATASET_REGISTRY
 
 from . import utils
 
-from .point_sampler import point_sampler, get_point_query_mask, temp_seed
+from .point_sampler import point_sampler, temp_seed
 from . import autoaugment
 from .hod import get_orientation_hist, compute_temporal_pyramid
 
@@ -44,6 +44,34 @@ def _load_point_queries(pt_dict, num_points):
             f"got {point_queries.numel()} query frames for {num_points} tracks."
         )
     return point_queries
+
+
+def _build_point_query_mask(point_queries, pred_visibility, mode):
+    """Select routing validity explicitly, independent of dump key spelling.
+
+    ``seed`` is for forward-only tracking, ``visibility`` also retains visible
+    backward-tracked observations, and ``all`` reproduces the historical
+    unmasked route. A seed index is not a visibility or tracking-direction flag.
+    """
+    visibility = torch.as_tensor(pred_visibility).bool()
+    if visibility.ndim != 2:
+        raise ValueError("pred_visibility must have shape [T,N].")
+    if mode == "visibility":
+        return visibility.clone()
+    if mode == "all":
+        return torch.ones_like(visibility)
+    if mode == "seed":
+        queries = torch.as_tensor(point_queries, device=visibility.device).long().flatten()
+        if queries.numel() != visibility.shape[1]:
+            raise ValueError("Point-query count must match pred_visibility [T,N].")
+        if ((queries < 0) | (queries >= visibility.shape[0])).any():
+            raise ValueError("Point-query frames must lie within the trajectory length.")
+        frames = torch.arange(visibility.shape[0], device=visibility.device)
+        return frames[:, None] >= queries[None, :]
+    raise ValueError(
+        "POINT_INFO.QUERY_MASK_MODE must be 'seed', 'visibility', or 'all'; "
+        f"got {mode!r}."
+    )
 
 
 @DATASET_REGISTRY.register()
@@ -87,6 +115,12 @@ class BaseDataset(torch.utils.data.Dataset):
         self._num_clips = 1
 
         logger.info("Constructing %s dataset...", mode)
+        logger.info(
+            "Trajectory routing mask: use_query_mask=%s, query_mask_mode=%s; "
+            "tracker visibility remains available separately.",
+            cfg.POINT_INFO.USE_PT_QUERY_MASK,
+            getattr(cfg.POINT_INFO, "QUERY_MASK_MODE", "seed"),
+        )
         self.sure = sure
         self.splits_root = os.path.join(self.cfg.DATA.PATH_TO_TROKEN_PT_DATA,
                                         "few_shot_info")
@@ -189,10 +223,7 @@ class BaseDataset(torch.utils.data.Dataset):
         pred_visibility = pt_dict['pred_visibility'].squeeze(0)
         obj_ids = pt_dict[self.cfg.POINT_INFO.OBJ_ID_KEY].clone().long()
         point_indices = torch.arange(pred_tracks.shape[1], dtype=torch.long)
-        if 'per_point_queries' in pt_dict:
-            per_point_queries = pt_dict['per_point_queries']
-        else:
-            per_point_queries = torch.zeros(pred_tracks.shape[1], dtype=torch.int64)
+        per_point_queries = _load_point_queries(pt_dict, pred_tracks.shape[1])
 
         # Selecting the frames for the current clip, currently only supports uniform sampling
         index_select = np.linspace(0, pred_tracks.shape[0] - 1,
@@ -294,7 +325,11 @@ class BaseDataset(torch.utils.data.Dataset):
         pt_query_mask = torch.ones_like(pred_visibility, dtype=torch.bool)
 
         if self.cfg.POINT_INFO.USE_PT_QUERY_MASK:
-            pt_query_mask = get_point_query_mask(per_point_queries, pt_query_mask)
+            pt_query_mask = _build_point_query_mask(
+                per_point_queries,
+                pred_visibility,
+                getattr(self.cfg.POINT_INFO, "QUERY_MASK_MODE", "seed"),
+            )
 
         # Normalizing the points between -1 and 1
 
@@ -367,12 +402,10 @@ class BaseDataset(torch.utils.data.Dataset):
         num_channels = video.shape[-1]
         if num_channels == 3:
             return video
-        if num_channels == 4:
-            return video[..., :3]
         if num_channels == 1:
             return np.repeat(video, 3, axis=-1)
         raise RuntimeError(
-            f"Expected decoded video to have 1, 3, or 4 channels, got {num_channels}."
+            f"Expected decoded video to have 1 or 3 channels, got {num_channels}."
         )
 
 

@@ -28,6 +28,27 @@ from itertools import combinations
 
 logger = logging.getLogger(__name__)
 
+
+def _repair_decord_rgb_layout(video):
+    """Remove row-alignment padding exposed as extra RGB channels by Decord.
+
+    Decord normally returns ``T x H x W x 3`` RGB. For some very small
+    MPEG-4 clips, its NumPy bridge exposes the aligned row buffer as
+    ``T x H x W x 4`` or ``T x H x W x 6``. The first ``W * 3`` bytes of
+    every row are the actual RGB pixels and the remaining bytes are padding.
+    """
+    if video.ndim != 4 or video.shape[-1] <= 3:
+        return video
+
+    num_frames, height, width, channels = video.shape
+    row_buffer = np.ascontiguousarray(video).reshape(
+        num_frames, height, width * channels
+    )
+    return row_buffer[..., : width * 3].reshape(
+        num_frames, height, width, 3
+    )
+
+
 def read_k400_video(video_path, max_fps=10, indices_to_take=None):
 
     vr = VideoReader(video_path)
@@ -43,7 +64,7 @@ def read_k400_video(video_path, max_fps=10, indices_to_take=None):
         frames_to_take = frames_to_take[indices_to_take]
     frames = [vr[i].asnumpy()[None] for i in frames_to_take]
     frames = np.concatenate(frames, axis=0)
-    return frames
+    return _repair_decord_rgb_layout(frames)
 
 
 def read_video(video_path, total_frames, indices_to_take=None):
@@ -69,6 +90,8 @@ def read_video(video_path, total_frames, indices_to_take=None):
     else:
         frames = [vr[i][None] for i in frames_to_take]
     frames = np.concatenate(frames, axis=0)
+    if not use_cv2:
+        frames = _repair_decord_rgb_layout(frames)
     return frames
 
 
@@ -573,8 +596,6 @@ def create_temporal_mask(cfg, points):
     # set diagnal to 1
     mask = mask + torch.eye(total_st_tokens, dtype=torch.bool)
     return mask
-
-
 
 
 

@@ -10,3 +10,4 @@ from .ssv2 import Ssv2 # noqa
 from .k400 import K400 # noqa
 from .finegym import Finegym # noqa
 from .sav import Sav # noqa
+from .tinyvirat import Tinyvirat # noqa

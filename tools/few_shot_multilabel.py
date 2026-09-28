@@ -691,8 +691,19 @@ def compute_ap_for_classes(storage, class_ids):
     return float(np.mean(list(aps.values())) * 100.0), aps
 
 
-def compute_episode_ap(labels, scores, episode_class_ids, target_class_ids):
-    """Compute macro AP for one episode over seen or novel classes only."""
+def compute_episode_ap(
+    labels,
+    scores,
+    episode_class_ids,
+    target_class_ids,
+    drop_empty_query_rows=False,
+):
+    """Compute macro AP for one episode over a Base/Novel class subset.
+
+    TinyVIRAT's protocol excludes Query rows with no positive label in the
+    evaluated subset. This flag is deliberately evaluation-only: it does not
+    alter episode sampling, Support/Query tensors, or training losses.
+    """
     class_mask = np.array(
         [class_id in set(target_class_ids) for class_id in episode_class_ids],
         dtype=bool,
@@ -708,6 +719,12 @@ def compute_episode_ap(labels, scores, episode_class_ids, target_class_ids):
 
     filtered_labels = filtered_labels[:, valid_labels]
     filtered_scores = filtered_scores[:, valid_labels]
+    if drop_empty_query_rows:
+        non_zero_mask = ~np.all(filtered_labels == 0, axis=1)
+        filtered_labels = filtered_labels[non_zero_mask]
+        filtered_scores = filtered_scores[non_zero_mask]
+        if filtered_labels.shape[0] == 0:
+            return None
     return float(
         average_precision_score(filtered_labels, filtered_scores, average="macro")
     )
@@ -717,19 +734,30 @@ def compute_base_novel_hm(storage, cfg):
     """Compute doc-style seen/novel AP: per episode first, then mean over episodes."""
     seen_episode_aps = []
     novel_episode_aps = []
+    drop_empty_query_rows = bool(
+        getattr(cfg.TEST, "DROP_EMPTY_QUERY_ROWS", False)
+    )
     for episode in storage["episodes"]:
         labels = np.array(episode["labels"], dtype=np.float32)
         scores = np.array(episode["scores"], dtype=np.float32)
         episode_class_ids = [int(class_id) for class_id in episode["episode_class_ids"]]
 
         ap_seen = compute_episode_ap(
-            labels, scores, episode_class_ids, cfg.TEST.SEEN_LABELS
+            labels,
+            scores,
+            episode_class_ids,
+            cfg.TEST.SEEN_LABELS,
+            drop_empty_query_rows=drop_empty_query_rows,
         )
         if ap_seen is not None:
             seen_episode_aps.append(ap_seen)
 
         ap_novel = compute_episode_ap(
-            labels, scores, episode_class_ids, cfg.TEST.NOVEL_LABELS
+            labels,
+            scores,
+            episode_class_ids,
+            cfg.TEST.NOVEL_LABELS,
+            drop_empty_query_rows=drop_empty_query_rows,
         )
         if ap_novel is not None:
             novel_episode_aps.append(ap_novel)

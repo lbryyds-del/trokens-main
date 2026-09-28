@@ -27,6 +27,10 @@ _C.TRAIN.ENABLE = True
 # Dataset.
 _C.TRAIN.DATASET = "kinetics"
 
+# Optional ordered class names. Multi-label datasets may use the test-time
+# vocabulary as their global label space while keeping a smaller train subset.
+_C.TRAIN.CLASS_NAME = []
+
 # Total mini-batch size.
 _C.TRAIN.BATCH_SIZE = 64
 
@@ -144,6 +148,9 @@ _C.TEST.ENABLE = True
 # Dataset for testing.
 _C.TEST.DATASET = "kinetics"
 
+# Optional ordered global class vocabulary (index in this list is the label id).
+_C.TEST.CLASS_NAME = []
+
 # Total mini-batch size
 _C.TEST.BATCH_SIZE = 8
 
@@ -162,6 +169,11 @@ _C.TEST.TEST_EPOCH_NUM = -1
 # episodes.
 _C.TEST.SEEN_LABELS = []
 _C.TEST.NOVEL_LABELS = []
+
+# If True, compute Base/Novel episode AP only over Query rows that contain at
+# least one positive label in the corresponding Base/Novel class subset. This
+# matches the TinyVIRAT/CLIP-FSAR evaluation protocol. Keep False for SAV.
+_C.TEST.DROP_EMPTY_QUERY_ROWS = False
 
 _C.MODEL = CfgNode()
 
@@ -314,6 +326,13 @@ _C.DATA.NUM_TEST_CLIPS = 1
 
 _C.DATA.DATA_CSV_NAME = ""
 _C.DATA.PATH_TO_DATA_DIR = ""
+# Optional directory containing dataset split/annotation files when they are
+# stored separately from the videos. Dataset loaders may fall back to
+# PATH_TO_DATA_DIR when this is empty.
+_C.DATA.PATH_TO_SPLIT_DIR = ""
+# Optional prompt groups aligned with TEST.CLASS_NAME. When empty, the dataset
+# class names (or SAV's built-in descriptive bank) are used.
+_C.DATA.LABEL_PROMPTS = []
 
 # The separator used between path and label.
 _C.DATA.PATH_LABEL_SEPARATOR = " "

@@ -42,6 +42,7 @@ import trokens.utils.misc as misc
 from trokens.datasets import loader
 from trokens.datasets.mixup import MixUp
 from trokens.models import build_model
+from trokens.utils.amp import checked_amp_scale
 from trokens.utils.meters import EpochTimer, TrainMeter, ValMeter
 from trokens.utils.multigrid import MultigridSchedule
 
@@ -264,6 +265,10 @@ def train_epoch(
     model.train()
     train_meter.iter_tic()
     data_size = len(train_loader)
+    amp_floor = float(getattr(cfg.SOLVER, "AMP_MIN_SCALE", 0.0))
+    amp_scale = checked_amp_scale(scaler, amp_floor)
+    optimizer_updates = 0
+    amp_skipped_updates = 0
     grad_accum_steps = int(getattr(cfg.SOLVER, "GRAD_ACCUM_STEPS", 1))
     if grad_accum_steps < 1:
         raise ValueError("SOLVER.GRAD_ACCUM_STEPS must be >= 1.")
@@ -472,8 +477,20 @@ def train_epoch(
                 )
 
             # Update the parameters only at the accumulation boundary.
+            scale_before = checked_amp_scale(scaler, amp_floor)
             scaler.step(optimizer)
             scaler.update()
+            amp_scale = float(scaler.get_scale())
+            if scaler.is_enabled() and amp_scale < scale_before:
+                amp_skipped_updates += 1
+                logger.warning(
+                    "AMP skipped optimizer update: epoch=%d iter=%d scale=%g -> %g "
+                    "(non-finite gradients; forward loss alone does not detect this).",
+                    cur_epoch + 1, cur_iter + 1, scale_before, amp_scale,
+                )
+            else:
+                optimizer_updates += 1
+            checked_amp_scale(scaler, amp_floor)
             optimizer.zero_grad(set_to_none=True)
         top1_err, top5_err = None, None
         classification_loss = loss_dict['classfication_loss']
@@ -606,6 +623,7 @@ def train_epoch(
         train_extra_metrics = {
             "q2s_loss": q2s_loss,
             "align_loss": align_loss,
+            "amp_scale": amp_scale,
             **query_route_metric_values,
         }
         train_meter.update_stats(
@@ -635,6 +653,10 @@ def train_epoch(
     # Log epoch stats.
     if progress_bar is not None:
         progress_bar.close()
+    logger.info(
+        "Optimizer epoch %d: updates=%d, AMP skipped=%d, final scale=%g.",
+        cur_epoch + 1, optimizer_updates, amp_skipped_updates, amp_scale,
+    )
     train_meter.log_epoch_stats(cur_epoch)
     train_meter.reset()
 
@@ -954,6 +976,11 @@ def train_few_shot(cfg, args, wandb_run=None):
     # Load a checkpoint to resume training if applicable.
     start_epoch = cu.load_train_checkpoint(
         cfg, model, optimizer, scaler if cfg.TRAIN.MIXED_PRECISION else None
+    )
+    logger.info(
+        "AMP initial/restored scale: %g; minimum allowed: %g.",
+        checked_amp_scale(scaler, getattr(cfg.SOLVER, "AMP_MIN_SCALE", 0.0)),
+        float(getattr(cfg.SOLVER, "AMP_MIN_SCALE", 0.0)),
     )
     # Create the video train and val loaders.
     train_loader = loader.construct_loader(cfg, "train")

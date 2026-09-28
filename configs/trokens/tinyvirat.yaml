@@ -1,0 +1,233 @@
+TASK: few_shot
+NUM_GPUS: 1
+OUTPUT_DIR: output/tinyvirat
+
+FEW_SHOT:
+  N_WAY: 5
+  K_SHOT: 3
+  TRAIN_QUERY_PER_CLASS: 6
+  TEST_QUERY_PER_CLASS: 1
+  TRAIN_EPISODES: 2000
+  TEST_EPISODES: 10000
+  PATCH_TOKENS_AGG: spatial
+  DIST_NORM: none
+  TRAIN_OG_EPISODES: False
+  SUPPORT_TEXT_FUSION:
+    ENABLE: True
+    TEXT_WEIGHT: 1.0
+    VISUAL_WEIGHT: 1.0
+    VISUAL_DETACH: True
+  POT_ROUTE:
+    ENABLE: True
+    FRAME_SOFTMAX_TAU: 0.04
+    TEMPORAL_REFINEMENT:
+      ENABLE: False
+      TYPE: lite_tcn_3ch_v1
+      HIDDEN_DIM: 16
+      KERNEL_SIZE: 3
+      LONG_DILATION: 2
+      MAX_LOGIT_DELTA: 0.5
+      WEIGHT_DECAY: 0.01
+      USE_VISIBILITY: True
+    QUERY_PARTIAL_ENABLE: True
+    QUERY_PARTIAL_LOGIT_ALPHA: 10.0
+    QUERY_PARTIAL_LOGIT_BIAS: -2.0
+  QUERY_CLASS_MATCHABILITY:
+    ENABLE: True
+    QUALITY_ENABLE: True
+    UNIQUENESS_ENABLE: True
+    MODE: "positive_confuser_margin"
+    TOPK_PATCHES: 8
+    TOPK_FRAMES: 3
+    EVIDENCE_SOURCE: "post"
+    CALIBRATION_BETA: 0.25
+    TEMPERATURE: 0.10
+    DETACH_SUPPORT_STATS: True
+    MARGIN_TEMPERATURE: 0.10
+    MARGIN_BIAS: 0.0
+    NEGATIVE_AGGREGATION: "max"
+    NEGATIVE_TOPK: 2
+    NEGATIVE_TEMPERATURE: 0.10
+    DETACH_CONFUSER_SUPPORT: True
+    LOCAL_REFINEMENT_ENABLE: False
+    LOCAL_MARGIN_TEMPERATURE: 0.10
+    LOCAL_LOGIT_STRENGTH: 0.50
+    LOCAL_POSITIVE_AGGREGATION: "topk_mean"
+    LOCAL_POSITIVE_TOPK: 2
+    LOCAL_NEGATIVE_AGGREGATION: "topk_mean"
+    LOCAL_NEGATIVE_TOPK: 2
+    LOCAL_NEGATIVE_TEMPERATURE: 0.10
+    LOCAL_DETACH_REFERENCES: True
+    EVIDENCE_VERIFICATION_ENABLE: True
+    EVIDENCE_USE_VISIBILITY: True
+    EVIDENCE_POSITIVE_AGGREGATION: "topk_mean"
+    EVIDENCE_POSITIVE_TOPK: 2
+    EVIDENCE_CONFUSER_AGGREGATION: "topk_mean"
+    EVIDENCE_CONFUSER_TOPK: 2
+    EVIDENCE_AGGREGATION_TEMPERATURE: 0.10
+    EVIDENCE_DETACH_REFERENCES: True
+    FRAME_MARGIN_TEMPERATURE: 0.10
+    FRAME_MARGIN_BIAS: 0.0
+    EVIDENCE_VIDEO_TOPK_FRAMES: 3
+    EVIDENCE_MIL_TEMPERATURE: 0.10
+    EVIDENCE_MIL_LOSS_WEIGHT: 0.10
+    ABSOLUTE_MASS_ENABLE: True
+    ABSOLUTE_MASS_SOURCE: "raw"
+    ABSOLUTE_MASS_USE_VISIBILITY: True
+    ABSOLUTE_MASS_PATCH_TOPK: 8
+    ABSOLUTE_MASS_SUPPORT_TOPK_FRAMES: 3
+    ABSOLUTE_MASS_CALIBRATION_BETA: 0.25
+    ABSOLUTE_MASS_TEMPERATURE: 0.05
+    ABSOLUTE_MASS_MIN_SUPPORT_GAP: 0.0
+    ABSOLUTE_MASS_DETACH_SUPPORT_STATS: True
+    ABSOLUTE_MASS_RELIABILITY_FALLBACK: True
+    ABSOLUTE_MASS_TRANSPORT_STRENGTH: 1.0
+    ABSOLUTE_MASS_UNMATCHED_COST: 0.0
+    ABSOLUTE_MASS_ONE_SIDED: True
+    DUAL_LOGIT_LOSS_ENABLE: True
+    BASE_LOGIT_LOSS_WEIGHT: 0.60
+    VERIFIED_LOGIT_LOSS_WEIGHT: 0.40
+POINT_INFO:
+  NAME: cotracker3_bip_fr_32_feat_dinotxt_vitl14reg4_fps_10
+  PT_FIX_SAMPLING_TRAIN: True
+  PT_FIX_SAMPLING_TEST: True
+  USE_PT_QUERY_MASK: True
+  # Same explicit visibility policy as SAV, including backward-tracked points.
+  QUERY_MASK_MODE: visibility
+  SAMPLING_TYPE: cluster_sample
+  NUM_POINTS_TO_SAMPLE: 256
+  GRID_SIZE: 16
+
+TRAIN:
+  ENABLE: True
+  DATASET: TinyVIRAT
+  CLASS_NAME: ['Opening', 'Interacts', 'Pull', 'activity_carrying', 'Exiting', 'Talking', 'activity_sitting', 'activity_walking', 'activity_standing', 'Transport_HeavyCarry', 'specialized_talking_phone', 'specialized_texting_phone']
+  BATCH_SIZE: 32
+  EVAL_PERIOD: 1
+  CHECKPOINT_PERIOD: 1
+  AUTO_RESUME: False
+  CHECKPOINT_FILE_PATH: ""
+  NEW_TRAIN: True
+  MIXED_PRECISION: True
+
+DATA:
+  PATH_TO_DATA_DIR: /data3/duanwei/data/tinyviratv2-3
+  PATH_TO_SPLIT_DIR: /data3/duanwei/trokens-main/data/tinyvirat
+  PATH_TO_TROKEN_PT_DATA: /data3/duanwei/trokens-main/data/trokens_pt_data
+  # Restore run_20260922_120538's TinyVIRAT descriptions, five per class.
+  # Group order must match TEST.CLASS_NAME; these never use the SAV bank.
+  LABEL_PROMPTS:
+    # 0: Opening
+    - ["opening something", "a person opens a door or container", "a hand pulls a door or lid open", "a closed entrance changes to an open position", "the person moves an object apart to reveal the inside"]
+    # 1: Interacts
+    - ["interacting with an object or person", "a person reaches toward and engages with something nearby", "the hands make contact during an interaction", "a person actively handles or responds to another subject", "visible contact occurs between the person and the surroundings"]
+    # 2: Pull
+    - ["pulling something", "a person draws an object toward the body", "the arms pull a door, handle, or item backward", "an object moves closer as the person exerts force", "the hands tug an object toward the person"]
+    # 3: activity_carrying
+    - ["carrying an object", "a person walks while holding something", "the arms support an item during movement", "an object is transported in the person's hands", "the person keeps a carried item close to the body"]
+    # 4: Entering
+    - ["entering a place or vehicle", "a person moves from outside into an interior", "the person crosses an entrance and goes inside", "a person steps through a doorway or vehicle opening", "the body disappears into the enclosed area"]
+    # 5: vehicle_moving
+    - ["a vehicle is moving", "a car or other vehicle travels through the scene", "the vehicle changes position along the road", "a moving vehicle passes through the camera view", "the vehicle advances while its surroundings shift"]
+    # 6: Exiting
+    - ["exiting a place or vehicle", "a person moves from inside to outside", "the person crosses an entrance while leaving", "a person steps out through a doorway or vehicle opening", "the body emerges from the enclosed area"]
+    # 7: Talking
+    - ["talking with another person", "a person speaks during a conversation", "two people face one another while talking", "mouth and head movement indicate speech", "people communicate together in the scene"]
+    # 8: vehicle_turning_left
+    - ["a vehicle turns left", "a car steers toward the left side of the road", "the vehicle changes direction with a leftward turn", "the front of the vehicle swings to the left", "a moving vehicle follows a left-curving path"]
+    # 9: activity_sitting
+    - ["sitting down or remaining seated", "a person sits on a chair or seat", "the person's hips rest on a seat", "the upper body stays in a seated posture", "a person is seated rather than standing"]
+    # 10: Closing
+    - ["closing something", "a person shuts a door or container", "a hand pushes a door or lid closed", "an open entrance changes to a closed position", "the person brings two sides together to cover an opening"]
+    # 11: activity_walking
+    - ["walking", "a person walks from one place to another", "the legs alternate during forward movement", "a person takes repeated steps through the scene", "the body advances with a walking gait"]
+    # 12: Push
+    - ["pushing something", "a person moves an object away from the body", "the arms push a door, cart, or item forward", "an object moves farther away as force is applied", "the hands press against an object to move it"]
+    # 13: specialized_using_tool
+    - ["using a tool", "a person operates a hand-held tool", "the hands manipulate equipment to perform a task", "a tool is applied to an object or surface", "the person performs work with a specialized instrument"]
+    # 14: activity_standing
+    - ["standing", "a person stands upright", "the body is supported by the feet", "the torso remains vertical while the person is stationary", "an upright person stands in the scene"]
+    # 15: Transport_HeavyCarry
+    - ["carrying a heavy object", "a person transports a large or heavy load", "the arms and body support a bulky item during movement", "a person carries a heavy object across the scene", "the person leans while moving a substantial load"]
+    # 16: activity_gesturing
+    - ["gesturing with the hands or arms", "a person makes an expressive hand gesture", "the arms move to signal or communicate", "a person points or waves during interaction", "visible body movement conveys a gesture"]
+    # 17: vehicle_turning_right
+    - ["a vehicle turns right", "a car steers toward the right side of the road", "the vehicle changes direction with a rightward turn", "the front of the vehicle swings to the right", "a moving vehicle follows a right-curving path"]
+    # 18: specialized_talking_phone
+    - ["talking on a phone", "a person holds a phone to the ear while speaking", "the person has a phone beside the face during a call", "hand and mouth movement indicate a phone conversation", "a person communicates through a mobile telephone"]
+    # 19: specialized_texting_phone
+    - ["texting on a phone", "a person looks at and types on a mobile phone", "the fingers tap the phone screen", "a person holds a phone while composing a message", "the head is directed toward a phone during typing"]
+    # 20: Misc
+    - ["a miscellaneous activity", "a person performs an action not covered by the other classes", "an uncategorized event occurs in the scene", "the observed behavior does not match a specific action label", "a general activity takes place without a specialized category"]
+  MULTI_LABEL: True
+  REVERSE_INPUT_CHANNEL: True
+  USE_OFFSET_SAMPLING: True
+  USE_RAND_AUGMENT: True
+  DECODING_BACKEND: torchvision
+  NUM_FRAMES: 8
+  SAMPLING_RATE: 4
+  TRAIN_JITTER_SCALES: [256, 320]
+  TRAIN_CROP_SIZE: 224
+  TEST_CROP_SIZE: 224
+  INPUT_CHANNEL_NUM: [3]
+  MEAN: [0.5, 0.5, 0.5]
+  STD: [0.5, 0.5, 0.5]
+  TRAIN_JITTER_SCALES_RELATIVE: [0.08, 1.0]
+  TRAIN_JITTER_ASPECT_RELATIVE: [0.75, 1.3333]
+  INV_UNIFORM_SAMPLE: True
+  RANDOM_FLIP: False
+
+AUG:
+  NUM_SAMPLE: 1
+  ENABLE: False
+  DIFFERENT_AUG_PER_FRAME: True
+  COLOR_JITTER: 0.0
+  AA_TYPE: rand-m7-n4-mstd0.5-inc1
+  INTERPOLATION: bicubic
+  RE_PROB: 0.0
+  RE_MODE: pixel
+  RE_COUNT: 1
+  RE_SPLIT: False
+
+SOLVER:
+  BASE_LR: 0.0001
+  GRAD_ACCUM_STEPS: 2
+  AMP_MIN_SCALE: 0.0001
+  LR_POLICY: cosine
+  COSINE_AFTER_WARMUP: True
+  COSINE_END_LR: 0.000001
+  LRS: [1, 0.1, 0.01]
+  STEPS: [0, 20, 40]
+  MAX_EPOCH: 20
+  MOMENTUM: 0.9
+  WEIGHT_DECAY: 0.5
+  WARMUP_EPOCHS: 5
+  OPTIMIZING_METHOD: adamw
+  TEMPRATURE: 1.0
+  WARMUP_START_LR: 1e-06
+
+MODEL:
+  NUM_CLASSES: 21
+  ARCH: slow
+  MODEL_NAME: Pointformer
+  LOSS_FUNC: bce_logit
+  FEAT_EXTRACTOR: dinotxt_vitl14_reg4
+  DINO_CONFIG: None
+  VIT_TYPE: None
+  RESNET_TYPE: None
+  MOTION_MODULE:
+    USE_CROSS_MOTION_MODULE: True
+    USE_HOD_MOTION_MODULE: True
+
+TEST:
+  ENABLE: True
+  DATASET: TinyVIRAT
+  CLASS_NAME: ['Opening', 'Interacts', 'Pull', 'activity_carrying', 'Entering', 'vehicle_moving', 'Exiting', 'Talking', 'vehicle_turning_left', 'activity_sitting', 'Closing', 'activity_walking', 'Push', 'specialized_using_tool', 'activity_standing', 'Transport_HeavyCarry', 'activity_gesturing', 'vehicle_turning_right', 'specialized_talking_phone', 'specialized_texting_phone', 'Misc']
+  BATCH_SIZE: 64
+  DROP_EMPTY_QUERY_ROWS: True
+  SEEN_LABELS: [0, 1, 2, 3, 6, 7, 9, 11, 14, 15, 18, 19]
+  NOVEL_LABELS: [4, 5, 8, 10, 12, 13, 16, 17, 20]
+
+DATA_LOADER:
+  NUM_WORKERS: 4
+  PIN_MEMORY: True

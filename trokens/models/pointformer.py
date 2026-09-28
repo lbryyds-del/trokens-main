@@ -265,6 +265,7 @@ class Pointformer(nn.Module):
                 self.text_to_model_proj = nn.Linear(self.text_feature_dim, self.embed_dim)
             if self.use_frame_softmax_route or self.use_text_alignment:
                 self.atomic_label_names = self._load_atomic_label_names()
+                self.atomic_label_prompt_groups = self._load_label_prompt_groups()
 
 
         # Initialize weights
@@ -448,15 +449,27 @@ class Pointformer(nn.Module):
         )
 
     def _load_atomic_label_names(self):
-        """Load the 0-based SAV atomic action names for POT routing."""
+        """Load the configured global class vocabulary for text routing.
+
+        SAV keeps its canonical vocabulary in ``education_first_label.pbtxt``.
+        Dataset-specific few-shot configurations (such as TinyVIRAT) provide
+        the global vocabulary directly in ``TEST.CLASS_NAME``.
+        """
         dataset_names = {
             str(getattr(self.cfg.TRAIN, "DATASET", "")).lower(),
             str(getattr(self.cfg.TEST, "DATASET", "")).lower(),
         }
         if "sav" not in dataset_names:
-            raise NotImplementedError(
-                "POT support routing currently expects SAV atomic label names."
-            )
+            configured_names = list(getattr(self.cfg.TEST, "CLASS_NAME", []))
+            if len(configured_names) != self.num_classes:
+                raise ValueError(
+                    "TEST.CLASS_NAME must contain MODEL.NUM_CLASSES entries for "
+                    "non-SAV text routing; "
+                    f"got {len(configured_names)} names for {self.num_classes} classes."
+                )
+            if any(not isinstance(name, str) or not name for name in configured_names):
+                raise ValueError("TEST.CLASS_NAME entries must be non-empty strings.")
+            return configured_names
 
         label_names = [str(class_id) for class_id in range(self.num_classes)]
         label_map_path = self._resolve_sav_label_map_path()
@@ -476,6 +489,45 @@ class Pointformer(nn.Module):
                     current_name = None
                     current_id = None
         return label_names
+
+    def _load_label_prompt_groups(self):
+        """Load configured prompt groups with dataset-safe fallbacks.
+
+        An explicit ``DATA.LABEL_PROMPTS`` value always wins. For SAV, an
+        empty value retains its established descriptive prompt bank. Other
+        datasets fall back to their own configured class names and therefore
+        never silently use SAV's 15-class vocabulary.
+        """
+        configured_groups = list(getattr(self.cfg.DATA, "LABEL_PROMPTS", []))
+        if configured_groups:
+            if len(configured_groups) != self.num_classes:
+                raise ValueError(
+                    "DATA.LABEL_PROMPTS must contain MODEL.NUM_CLASSES groups; "
+                    f"got {len(configured_groups)} groups for {self.num_classes} classes."
+                )
+            prompt_groups = []
+            for class_id, configured_group in enumerate(configured_groups):
+                group = list(configured_group)
+                if not group or any(
+                    not isinstance(prompt, str) or not prompt for prompt in group
+                ):
+                    raise ValueError(
+                        "Every DATA.LABEL_PROMPTS group must contain non-empty "
+                        f"strings; invalid group at class id {class_id}."
+                    )
+                prompt_groups.append(group)
+            return prompt_groups
+
+        dataset_names = {
+            str(getattr(self.cfg.TRAIN, "DATASET", "")).lower(),
+            str(getattr(self.cfg.TEST, "DATASET", "")).lower(),
+        }
+        if "sav" in dataset_names:
+            return [
+                self._get_sav_label_prompts(label_name)
+                for label_name in self.atomic_label_names
+            ]
+        return [[label_name.replace("_", " ")] for label_name in self.atomic_label_names]
 
     def _get_sav_label_prompts(self, label_name):
         """Return visually grounded prompt variants for every SAV atomic label."""
@@ -597,7 +649,7 @@ class Pointformer(nn.Module):
             )
 
         prompt_groups = [
-            self._get_sav_label_prompts(self.atomic_label_names[int(class_id)])
+            self.atomic_label_prompt_groups[int(class_id)]
             for class_id in global_class_indices.detach().cpu().tolist()
         ]
         flat_prompts = [prompt for group in prompt_groups for prompt in group]
@@ -938,33 +990,63 @@ class Pointformer(nn.Module):
 
     def _aggregate_weighted_st_support_tokens(self, feat, point_mask, st_weights):
         """Aggregate spatio-temporal token weights into per-frame support prototypes."""
-        feat = torch.nan_to_num(feat, nan=0.0, posinf=0.0, neginf=0.0)
-        point_mask = point_mask.to(device=feat.device).bool()
-        st_weights = torch.nan_to_num(
-            st_weights.to(device=feat.device, dtype=feat.dtype),
+        # Keep the complete aggregation in FP32.  Under CUDA autocast, the
+        # previous FP16 einsum could overflow in its backward pass for frames
+        # with no valid routed points, even though the forward prototype was
+        # later sanitized to zero.
+        feat_dtype = feat.dtype
+        with torch.autocast(device_type=feat.device.type, enabled=False):
+            feat = torch.nan_to_num(feat.float(), nan=0.0, posinf=0.0, neginf=0.0)
+            point_mask = point_mask.to(device=feat.device).bool()
+            st_weights = torch.nan_to_num(
+                st_weights.to(device=feat.device, dtype=torch.float32),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            ).clamp_min(0.0)
+            temporal_dim, num_points = point_mask.shape
+            st_weights = st_weights.view(temporal_dim, num_points)
+
+            frame_weights = point_mask.to(torch.float32) * st_weights
+            weighted_denom = frame_weights.sum(dim=1, keepdim=True)
+            weighted_proto = (
+                feat * frame_weights.unsqueeze(-1)
+            ).sum(dim=1) / torch.where(
+                weighted_denom > 0.0,
+                weighted_denom.clamp_min(1e-6),
+                torch.ones_like(weighted_denom),
+            )
+
+            valid_weights = point_mask.to(torch.float32)
+            valid_denom = valid_weights.sum(dim=1, keepdim=True)
+            valid_proto = (
+                feat * valid_weights.unsqueeze(-1)
+            ).sum(dim=1) / valid_denom.clamp_min(1.0)
+            zero_proto = torch.zeros_like(valid_proto)
+            valid_proto = torch.where(
+                valid_denom > 0.0,
+                valid_proto,
+                zero_proto,
+            )
+            proto = torch.where(
+                weighted_denom > 0.0,
+                weighted_proto,
+                valid_proto,
+            )
+            # Explicitly cut the empty-frame branch.  This prevents the
+            # derivative of a later zero-vector normalization from becoming a
+            # huge 1/epsilon value for a frame with no evidence.
+            proto = torch.where(
+                point_mask.any(dim=1).unsqueeze(-1),
+                proto,
+                zero_proto,
+            )
+        return torch.nan_to_num(
+            proto.to(dtype=feat_dtype),
             nan=0.0,
             posinf=0.0,
             neginf=0.0,
-        ).clamp_min(0.0)
-        temporal_dim, num_points = point_mask.shape
-        st_weights = st_weights.view(temporal_dim, num_points)
-
-        frame_weights = point_mask.to(feat.dtype) * st_weights
-        weighted_denom = frame_weights.sum(dim=1, keepdim=True)
-        weighted_proto = (
-            feat * frame_weights.unsqueeze(-1)
-        ).sum(dim=1) / weighted_denom.clamp_min(1e-6)
-
-        valid_weights = point_mask.to(feat.dtype)
-        valid_proto = (
-            feat * valid_weights.unsqueeze(-1)
-        ).sum(dim=1) / valid_weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
-        proto = torch.where(
-            weighted_denom > 0.0,
-            weighted_proto,
-            valid_proto,
         )
-        return torch.nan_to_num(proto, nan=0.0, posinf=0.0, neginf=0.0)
 
     def _safe_l2_normalize(self, value, dim=-1):
         """Normalize features without producing NaNs for zero vectors."""
@@ -1125,56 +1207,82 @@ class Pointformer(nn.Module):
                 "Batched similarity must match patch tokens [B,K,T,N]."
             )
 
-        patch_tokens = torch.nan_to_num(
-            patch_tokens, nan=0.0, posinf=0.0, neginf=0.0,
-        )
-        point_mask = point_mask.to(device=patch_tokens.device).bool()
-        similarity = torch.nan_to_num(
-            similarity.to(device=patch_tokens.device).float(),
-            nan=0.0,
-            posinf=1e4,
-            neginf=-1e4,
-        )
-        if softmax_tau is None:
-            softmax_tau = getattr(
-                self.pot_route_cfg,
-                "FRAME_SOFTMAX_TAU",
-                0.07,
+        output_dtype = patch_tokens.dtype
+        # Autocast must be disabled for both einsums and their divisions.  The
+        # forward values are bounded, but the empty-frame backward path is not.
+        with torch.autocast(device_type=patch_tokens.device.type, enabled=False):
+            patch_tokens = torch.nan_to_num(
+                patch_tokens.float(), nan=0.0, posinf=0.0, neginf=0.0,
             )
-        patch_weights = self._masked_softmax_1d(
-            similarity,
-            point_mask.unsqueeze(1),
-            dim=-1,
-            tau=max(float(softmax_tau), 1e-6),
-        ).to(dtype=patch_tokens.dtype)
+            point_mask = point_mask.to(device=patch_tokens.device).bool()
+            similarity = torch.nan_to_num(
+                similarity.to(device=patch_tokens.device).float(),
+                nan=0.0,
+                posinf=1e4,
+                neginf=-1e4,
+            )
+            if softmax_tau is None:
+                softmax_tau = getattr(
+                    self.pot_route_cfg,
+                    "FRAME_SOFTMAX_TAU",
+                    0.07,
+                )
+            patch_weights = self._masked_softmax_1d(
+                similarity,
+                point_mask.unsqueeze(1),
+                dim=-1,
+                tau=max(float(softmax_tau), 1e-6),
+            )
 
-        frame_weights = patch_weights * point_mask.unsqueeze(1).to(
-            patch_weights.dtype,
-        )
-        weighted_denom = frame_weights.sum(dim=-1, keepdim=True)
-        weighted_proto = torch.einsum(
-            "bktn,btnd->bktd",
-            frame_weights,
-            patch_tokens,
-        ) / weighted_denom.clamp_min(1e-6)
+            frame_weights = patch_weights * point_mask.unsqueeze(1).to(
+                torch.float32,
+            )
+            weighted_denom = frame_weights.sum(dim=-1, keepdim=True)
+            weighted_proto = torch.einsum(
+                "bktn,btnd->bktd",
+                frame_weights,
+                patch_tokens,
+            ) / torch.where(
+                weighted_denom > 0.0,
+                weighted_denom.clamp_min(1e-6),
+                torch.ones_like(weighted_denom),
+            )
 
-        valid_weights = point_mask.to(patch_tokens.dtype)
-        valid_proto = torch.einsum(
-            "btn,btnd->btd",
-            valid_weights,
-            patch_tokens,
-        ) / valid_weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
-        prototypes = torch.where(
-            weighted_denom > 0.0,
-            weighted_proto,
-            valid_proto.unsqueeze(1),
-        )
+            valid_weights = point_mask.to(torch.float32)
+            valid_denom = valid_weights.sum(dim=-1, keepdim=True)
+            valid_proto = torch.einsum(
+                "btn,btnd->btd",
+                valid_weights,
+                patch_tokens,
+            ) / valid_denom.clamp_min(1.0)
+            zero_proto = torch.zeros_like(valid_proto)
+            valid_proto = torch.where(
+                valid_denom > 0.0,
+                valid_proto,
+                zero_proto,
+            )
+            prototypes = torch.where(
+                weighted_denom > 0.0,
+                weighted_proto,
+                valid_proto.unsqueeze(1),
+            )
+            prototypes = torch.where(
+                point_mask.any(dim=-1).unsqueeze(1).unsqueeze(-1),
+                prototypes,
+                torch.zeros_like(prototypes),
+            )
         return (
             torch.nan_to_num(
-                prototypes, nan=0.0, posinf=0.0, neginf=0.0,
+                prototypes.to(dtype=output_dtype),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
             ),
             torch.nan_to_num(
-                patch_weights, nan=0.0, posinf=0.0, neginf=0.0,
+                patch_weights.to(dtype=output_dtype),
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
             ),
         )
 

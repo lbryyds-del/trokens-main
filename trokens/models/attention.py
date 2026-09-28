@@ -33,22 +33,35 @@ class Attention(nn.Module):
             q, k, v  = qkv, qkv, qkv
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
+        valid_rows = None
         if self.use_mask:
+            mask = mask.to(device=attn.device).bool()
             if len(mask.shape) == 2:
                 # extra_dim for heads and dim on which attention is not applied
-                attn = attn.masked_fill(torch.logical_not(mask[:,None,None,:]), float('-inf'))
+                key_mask = mask[:, None, None, :]
             else:
                 # extra_dim for heads
                 # mask -> bs x num_spacetime_tokens x num_spacetime_tokens
-                attn = attn.masked_fill(torch.logical_not(mask[:,None,:,:]), float('-inf'))
+                key_mask = mask[:, None, :, :]
+            valid_rows = key_mask.any(dim=-1, keepdim=True)
+            attn = attn.masked_fill(~key_mask, float('-inf'))
+            # softmax([-inf, ...]) has NaN forward AND backward. Evaluate
+            # empty rows on finite constants, then give them exactly zero mass.
+            attn = torch.where(valid_rows, attn, torch.zeros_like(attn))
 
         attn = attn.softmax(dim=-1)
+        if self.use_mask:
+            attn = attn.masked_fill(~key_mask, 0.0)
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(batch_size, seq_len, feat_dim)
         if self.with_qkv:
             x = self.proj(x)
             x = self.proj_drop(x)
+        if valid_rows is not None:
+            # Also remove projection bias when there was no valid key. This
+            # does not invent a visible point or alter any nonempty row.
+            x = torch.where(valid_rows.squeeze(1), x, torch.zeros_like(x))
         return x
 
 class Block(nn.Module):

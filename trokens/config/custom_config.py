@@ -34,6 +34,8 @@ def add_custom_config(cfg):
     # update.  The SAV two-GPU experiment overrides this to 2 so that its
     # effective global episode batch matches the previous four-GPU run.
     cfg.SOLVER.GRAD_ACCUM_STEPS = 1
+    # Opt-in floor; zero disables the floor, not non-finite scale checks.
+    cfg.SOLVER.AMP_MIN_SCALE = 0.0
     cfg.FEW_SHOT.SUPPORT_TEXT_FUSION = CfgNode()
     cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.ENABLE = False
     cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.TEXT_WEIGHT = 1.0
@@ -154,6 +156,9 @@ def add_custom_config(cfg):
     cfg.POINT_INFO.PT_FIX_SAMPLING_TRAIN = False
     cfg.POINT_INFO.PT_FIX_SAMPLING_TEST = False
     cfg.POINT_INFO.USE_PT_QUERY_MASK = False
+    # seed: forward-tracking start mask; visibility: observed points including
+    # backward tracks; all: explicit historical unmasked-route ablation.
+    cfg.POINT_INFO.QUERY_MASK_MODE = "seed"
     cfg.POINT_INFO.OBJ_ID_KEY = 'obj_ids'
     cfg.POINT_INFO.HOD = CfgNode()
     cfg.POINT_INFO.HOD.NUM_BINS = 32
