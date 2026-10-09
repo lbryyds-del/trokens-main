@@ -41,14 +41,22 @@ def test_visibility_keeps_backward_observations_but_not_invisible_points():
         _build_point_query_mask(seeds, visible, "guess_from_key")
 
 
-def test_datasets_explicitly_share_visibility_policy():
-    for ds in ["sav", "tinyvirat"]:
-        cfg = get_cfg()
-        cfg.merge_from_file(f"configs/trokens/{ds}.yaml")
-        assert cfg.POINT_INFO.USE_PT_QUERY_MASK
-        assert cfg.POINT_INFO.QUERY_MASK_MODE == "visibility"
-        assert not cfg.TRAIN.AUTO_RESUME
-        assert cfg.TRAIN.CHECKPOINT_FILE_PATH == ""
+@pytest.mark.parametrize("ds,mask_mode", [("sav", "all"), ("tinyvirat", "visibility")])
+def test_datasets_keep_explicit_mask_policy_and_fresh_training(ds, mask_mode):
+    cfg = get_cfg()
+    cfg.merge_from_file(f"configs/trokens/{ds}.yaml")
+    assert cfg.POINT_INFO.USE_PT_QUERY_MASK
+    assert cfg.POINT_INFO.QUERY_MASK_MODE == mask_mode
+    assert not cfg.TRAIN.AUTO_RESUME
+    assert cfg.TRAIN.CHECKPOINT_FILE_PATH == ""
+
+    visibility = torch.tensor([[True, False], [False, False], [True, True]])
+    original_visibility = visibility.clone()
+    mask = _build_point_query_mask([2, 2], visibility, cfg.POINT_INFO.QUERY_MASK_MODE)
+    expected = torch.ones_like(visibility) if ds == "sav" else visibility
+    assert torch.equal(mask, expected)
+    # Restoring SAV routing must not overwrite the separate tracker visibility.
+    assert torch.equal(visibility, original_visibility)
 
 
 @pytest.mark.parametrize("pairwise", [False, True])

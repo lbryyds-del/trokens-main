@@ -4,7 +4,7 @@ OUTPUT_DIR: output/sav
 
 FEW_SHOT:
   N_WAY: 5
-  K_SHOT: 3
+  K_SHOT: 1
   TRAIN_QUERY_PER_CLASS: 6
   TEST_QUERY_PER_CLASS: 1
   TRAIN_EPISODES: 2000
@@ -116,9 +116,9 @@ POINT_INFO:
   PT_FIX_SAMPLING_TRAIN: True
   PT_FIX_SAMPLING_TEST: True
   USE_PT_QUERY_MASK: True
-  # These CoTracker dumps include backward tracks. Do not mask by seed time.
-  # This differs from historical SAV's implicit all-True query mask.
-  QUERY_MASK_MODE: visibility
+  # Restore historical SAV's all-True mask for Pointformer and patch routing.
+  # Keep tracker visibility available to its separate motion/evidence consumers.
+  QUERY_MASK_MODE: all
   SAMPLING_TYPE: cluster_sample
   NUM_POINTS_TO_SAMPLE: 256
   GRID_SIZE: 16

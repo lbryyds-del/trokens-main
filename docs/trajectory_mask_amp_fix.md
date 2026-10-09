@@ -10,20 +10,23 @@ With `POINT_INFO.USE_PT_QUERY_MASK: True`, `QUERY_MASK_MODE` selects:
 
 | Mode | Meaning |
 | --- | --- |
-| `visibility` | Use the stored tracker visibility, including visible points before their seed frame. Selected by both SAV and TinyVIRAT YAMLs. |
+| `visibility` | Use the stored tracker visibility, including visible points before their seed frame. Selected by the TinyVIRAT YAML. |
 | `seed` | Admit a trajectory only at/after its seed frame. For forward-only tracking; default for other configs. |
-| `all` | Explicit unmasked-routing control, reproducing historical SAV behavior for dumps containing `point_queries` but no `per_point_queries`. |
+| `all` | Explicit unmasked-routing control, reproducing historical SAV behavior for dumps containing `point_queries` but no `per_point_queries`. Selected by the SAV YAML for the historical-mask ablation. |
 
 The loader recognizes both key spellings, but key spelling alone is NOT used
 to infer tracking direction. The current nongrid CoTracker producer requests
-backward tracking; the dataset configs explicitly choose visibility for it.
+backward tracking. TinyVIRAT retains the visibility policy. On 2026-10-08, SAV
+was switched back to `all` for a historical-mask ablation, retaining the
+numerical fixes below and leaving temporal refinement and both Query judgments
+disabled. This is a mask-policy restoration, not a full historical-code rollback.
 
 Historical SAV's loader read only `per_point_queries`; these dumps contain
 `point_queries`, so it defaulted seed indices to zero and produced all-True
 query masks. Thus the new visibility policy is **not numerically identical to
 historical SAV** and should be reported as a mask-policy change in experiments.
 For a historical-policy ablation set `POINT_INFO.QUERY_MASK_MODE all` explicitly
-for both datasets, while retaining the numerical fixes. Visibility still has
+in the target dataset config, while retaining the numerical fixes. Visibility still has
 its original separate consumers (motion/evidence); `all` is not global removal
 of every visibility check.
 
