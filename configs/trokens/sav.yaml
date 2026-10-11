@@ -1,6 +1,7 @@
 TASK: few_shot
 NUM_GPUS: 1
-OUTPUT_DIR: output/sav
+# Separate v3 artifacts from the completed hand/v1/v2 experiments.
+OUTPUT_DIR: output/sav_semantic_relation_v3
 
 FEW_SHOT:
   N_WAY: 5
@@ -35,11 +36,45 @@ FEW_SHOT:
     QUERY_PARTIAL_LOGIT_BIAS: -2.0
   QUERY_CLASS_MATCHABILITY:
     ENABLE: True
+    # Switch to "legacy" to reproduce the original two heuristic judgments.
+    BACKEND: learned_dual_verifier
+    LEARNED_VERIFIER:
+      HIDDEN_DIM: 128
+      NUM_HEADS: 4
+      NUM_LAYERS: 1
+      FFN_DIM: 256
+      # v3: original Raw cosine + bounded Support-conditioned vector relation.
+      # Use semantic_attention with a v2 checkpoint for the previous quality head.
+      QUALITY_MODE: semantic_relation
+      QUALITY_HIDDEN_DIM: 64
+      QUALITY_PATCH_TEMPERATURE: 0.07
+      QUALITY_REFERENCE_TEMPERATURE: 0.10
+      QUALITY_MAX_POOL_DELTA: 0.5
+      QUALITY_MAX_REFERENCE_DELTA: 0.5
+      QUALITY_MAX_EVIDENCE_DELTA: 0.10
+      QUALITY_SCALE_INIT: 10.0
+      QUALITY_BIAS_INIT: 0.0
+      QUALITY_RELATION_STRENGTH: 1.0
+      # v2: direct Post cosine evidence + learned smooth pooling/calibration.
+      # v1 evaluation needs semantic_attention quality + relation_attention rho.
+      UNIQUENESS_MODE: metric
+      METRIC_TEMPERATURE_INIT: 0.10
+      METRIC_SCALE_INIT: 10.0
+      DETACH_INPUTS: True
+      WEIGHT_DECAY: 0.01
+      SEMANTIC_MIL_WEIGHT: 0.05
+      RELATION_MIL_WEIGHT: 0.05
+      TRANSPORT_WARMUP_FRACTION: 0.05
+      QUERY_CHUNK_SIZE: 16
+      ACTIVATION_CHECKPOINT: False
+      AMP_ENABLE: True
+      LEGACY_DIAGNOSTICS: False
     # Only toggle these two flags for quality / uniqueness ablations.
     # Query routing and temporal refinement remain enabled independently.
     QUALITY_ENABLE: True
     UNIQUENESS_ENABLE: True
-    # Algorithm choice, not an on/off switch; toggling flags does not change it.
+    # Legacy settings below are retained for a one-flag rollback. The learned
+    # backend ignores their scores, Top-Ks, temperatures and calibration rules.
     MODE: "positive_confuser_margin"
     # Legacy threshold-mode evidence (kept for R1 rollback/comparison).
     TOPK_PATCHES: 8
@@ -102,6 +137,7 @@ FEW_SHOT:
     ABSOLUTE_MASS_MIN_SUPPORT_GAP: 0.0
     ABSOLUTE_MASS_DETACH_SUPPORT_STATS: True
     ABSOLUTE_MASS_RELIABILITY_FALLBACK: True
+    # Shared matcher/loss settings below remain active in BOTH backends.
     ABSOLUTE_MASS_TRANSPORT_STRENGTH: 1.0
     # At m=0 the visual match is neutral (cosine 0), then the existing -2
     # q2s bias still applies.

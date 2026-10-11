@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from sklearn.metrics import average_precision_score
 
 import trokens.utils.distributed as du
-from trokens.config.query_judgments import resolve_query_judgments
+from trokens.config.query_judgments import resolve_query_judgments, query_judgment_backend
 
 
 def q2s_cos_sim_fp32(x, y, epsilon=0.01):
@@ -254,6 +254,31 @@ def compute_evidence_mil_loss(
     }
 
 
+def compute_learned_evidence_mil_loss(frame_logits, frame_valid, labels):
+    """Video-label supervision without a Top-K or calibrated temperature.
+
+    A negative label value denotes unknown and is not supervised. Empty frame
+    bags remain connected to autograd with exactly zero gradient.
+    """
+    if frame_logits.ndim != 3 or frame_valid.shape != frame_logits.shape:
+        raise ValueError("Learned MIL requires logits and valid masks shaped [Q,K,T].")
+    if labels.shape != frame_logits.shape[:2]:
+        raise ValueError("Learned MIL labels must have shape [Q,K].")
+    with torch.autocast(device_type=frame_logits.device.type, enabled=False):
+        logits = frame_logits.float()
+        valid = frame_valid.bool()
+        count = valid.sum(-1)
+        masked = logits.masked_fill(~valid, -torch.inf)
+        masked = torch.where(count.unsqueeze(-1) > 0, masked, torch.zeros_like(masked))
+        bag_logits = torch.logsumexp(masked, dim=-1) - count.clamp_min(1).float().log()
+        bag_logits = torch.where(count > 0, bag_logits, torch.zeros_like(bag_logits))
+        labels = labels.to(logits.device).float()
+        pair_valid = (count > 0) & torch.isfinite(labels) & (labels >= 0) & (labels <= 1)
+        loss = (F.binary_cross_entropy_with_logits(bag_logits[pair_valid], labels[pair_valid])
+                if pair_valid.any() else bag_logits.sum() * 0.0)
+    return {"loss": loss, "logits": bag_logits, "valid": pair_valid}
+
+
 def compute_query_partial_q2s_loss(
     verified_logits,
     q2s_labels,
@@ -297,23 +322,24 @@ def compute_query_partial_q2s_loss(
             neginf=-30.0,
         )
 
+    match_cfg = getattr(getattr(cfg, "FEW_SHOT", None), "QUERY_CLASS_MATCHABILITY", None)
+    learned = query_judgment_backend(match_cfg) == "learned_dual_verifier"
     labels = q2s_labels.float()
+    def supervised_bce(logits):
+        if not learned:
+            return F.binary_cross_entropy_with_logits(logits.float(), labels)
+        known = torch.isfinite(labels) & (labels >= 0) & (labels <= 1)
+        return (F.binary_cross_entropy_with_logits(logits.float()[known], labels[known])
+                if known.any() else logits.sum() * 0.0)
+
     verified_scaled = _sanitize(verified_logits)
-    verified_loss = F.binary_cross_entropy_with_logits(
-        verified_scaled.float(),
-        labels,
-    )
+    verified_loss = supervised_bce(verified_scaled)
     diagnostics = {
         "q2s_verified_loss": verified_loss.detach(),
     }
 
-    match_cfg = getattr(
-        getattr(cfg, "FEW_SHOT", None),
-        "QUERY_CLASS_MATCHABILITY",
-        None,
-    )
     dual_enabled = bool(getattr(match_cfg, "DUAL_LOGIT_LOSS_ENABLE", False))
-    evidence_mil_weight = float(
+    evidence_mil_weight = 0.0 if learned else float(
         getattr(match_cfg, "EVIDENCE_MIL_LOSS_WEIGHT", 0.0)
     )
     if not np.isfinite(evidence_mil_weight) or evidence_mil_weight < 0.0:
@@ -322,6 +348,33 @@ def compute_query_partial_q2s_loss(
         )
     if not resolve_query_judgments(match_cfg).frame_verification:
         evidence_mil_weight = 0.0
+    learned_aux_loss = verified_loss.new_zeros(())
+    if learned:
+        # No legacy margin/Top-K MIL is evaluated, even if retained YAML fields
+        # still carry their old nonzero values for other backend configurations.
+        evidence_mil_weight = 0.0
+        judgments = resolve_query_judgments(match_cfg)
+        verifier_cfg = getattr(match_cfg, "LEARNED_VERIFIER", None)
+        for name, enabled, weight_name in (
+            ("quality", judgments.quality, "SEMANTIC_MIL_WEIGHT"),
+            ("relation", judgments.uniqueness, "RELATION_MIL_WEIGHT"),
+        ):
+            if not enabled:
+                continue
+            weight = float(getattr(verifier_cfg, weight_name, 0.05))
+            if not np.isfinite(weight) or weight < 0:
+                raise ValueError(f"{weight_name} must be finite and non-negative.")
+            if not isinstance(few_shot_aux, dict) or f"query_{name}_logits" not in few_shot_aux:
+                raise ValueError(f"Learned {name} MIL requires new verifier logits, not legacy margins.")
+            mil = compute_learned_evidence_mil_loss(
+                few_shot_aux[f"query_{name}_logits"],
+                few_shot_aux[f"query_{name}_valid"], labels,
+            )
+            learned_aux_loss = learned_aux_loss + weight * mil["loss"]
+            diagnostics[f"q2s_{name}_mil_loss"] = mil["loss"].detach()
+            diagnostics[f"q2s_{name}_mil_valid_fraction"] = mil["valid"].float().mean().detach()
+        if isinstance(few_shot_aux, dict) and "query_verifier_transport_strength" in few_shot_aux:
+            diagnostics["q2s_verifier_transport_strength"] = few_shot_aux["query_verifier_transport_strength"].detach()
 
     evidence_mil = None
     if evidence_mil_weight > 0.0:
@@ -360,7 +413,7 @@ def compute_query_partial_q2s_loss(
         })
 
     if not dual_enabled:
-        loss = verified_loss
+        loss = verified_loss + learned_aux_loss
         if evidence_mil is not None:
             loss = loss + evidence_mil_weight * evidence_mil["loss"]
         return loss, verified_scaled, diagnostics
@@ -398,11 +451,8 @@ def compute_query_partial_q2s_loss(
         )
 
     base_scaled = _sanitize(base_logits)
-    base_loss = F.binary_cross_entropy_with_logits(
-        base_scaled.float(),
-        labels,
-    )
-    loss = base_weight * base_loss + verified_weight * verified_loss
+    base_loss = supervised_bce(base_scaled)
+    loss = base_weight * base_loss + verified_weight * verified_loss + learned_aux_loss
     if evidence_mil is not None:
         loss = loss + evidence_mil_weight * evidence_mil["loss"]
     diagnostics.update({
@@ -458,6 +508,48 @@ def get_query_matchability_metrics(few_shot_aux, q2s_labels):
             "q2s_labels must match Query matchability [Q,K]; got "
             f"{tuple(labels.shape)} versus {tuple(matchability.shape)}."
         )
+
+    if few_shot_aux.get("query_verifier_backend") == "learned_dual_verifier":
+        # Never label unbounded learned logits as the old cosine margins.
+        metrics = {}
+        pairs = {
+            "verifier_quality": "query_quality_mass_mean",
+            "verifier_rho": "query_frame_matchability_mean",
+            "verifier_quality_logit": "query_quality_logit_mean",
+            "verifier_relation_logit": "query_relation_logit_mean",
+            "verifier_target_mass": "query_frame_target_mass_mean",
+            "verifier_confuser_mass": "query_frame_confuser_mass_mean",
+            "verifier_null_mass": "query_frame_null_mass_mean",
+            "verifier_quality_effective_patches": "query_quality_effective_patches_mean",
+            "verifier_quality_top1_mass": "query_quality_top1_mass_mean",
+            "verifier_quality_anchor": "query_quality_anchor_mean",
+            "verifier_quality_correction": "query_quality_correction_mean",
+            "verifier_quality_correction_abs": "query_quality_correction_abs_mean",
+            "verifier_quality_correction_saturation": "query_quality_correction_saturation_mean",
+            "verifier_quality_pool_shift": "query_quality_pool_shift_mean",
+            "verifier_route_effective_patches": "query_evidence_effective_patches_mean",
+            "verifier_route_top1_mass": "query_evidence_top1_mass_mean",
+            "verifier_logit_delta": "query_frame_transport_logit_delta",
+        }
+        for name, key in pairs.items():
+            value = few_shot_aux.get(key)
+            if value is None:
+                continue
+            if value.shape != labels.shape:
+                raise ValueError(f"{key} must match Query labels [Q,K].")
+            for suffix, mask in (("positive", labels > 0.5), ("negative", labels == 0)):
+                selected = value[mask]
+                metrics[f"{name}_{suffix}"] = selected.float().mean() if selected.numel() else value.new_zeros(())
+        for branch in ("quality", "relation"):
+            available = few_shot_aux.get(f"query_{branch}_reference_available")
+            if available is not None:
+                metrics[f"verifier_{branch}_reference_fraction"] = available.float().mean()
+        for name in ("metric_temperature", "metric_scale", "quality_scale", "quality_bias",
+                     "quality_relation_strength", "quality_max_evidence_delta"):
+            value = few_shot_aux.get("query_" + name)
+            if value is not None:
+                metrics["verifier_" + name] = value.float()
+        return {name: value.detach() for name, value in metrics.items()}
 
     def _pair_tensor(key, default=None):
         value = few_shot_aux.get(key, default)

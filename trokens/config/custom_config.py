@@ -67,6 +67,40 @@ def add_custom_config(cfg):
     # candidate should be trusted; text+Support routing still determines where.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY = CfgNode()
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE = False
+    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BACKEND = "legacy"
+    verifier = CfgNode()
+    verifier.HIDDEN_DIM = 128
+    verifier.NUM_HEADS = 4
+    verifier.NUM_LAYERS = 1
+    verifier.FFN_DIM = 256
+    # Old quality remains the global default; SAV opts into bounded quality v3.
+    verifier.QUALITY_MODE = "semantic_attention"
+    verifier.QUALITY_HIDDEN_DIM = 64
+    verifier.QUALITY_PATCH_TEMPERATURE = 0.07
+    verifier.QUALITY_REFERENCE_TEMPERATURE = 0.10
+    verifier.QUALITY_MAX_POOL_DELTA = 0.5
+    verifier.QUALITY_MAX_REFERENCE_DELTA = 0.5
+    verifier.QUALITY_MAX_EVIDENCE_DELTA = 0.10
+    verifier.QUALITY_SCALE_INIT = 10.0
+    verifier.QUALITY_BIAS_INIT = 0.0
+    # Inference mechanism control: 0 removes only the final relation correction.
+    verifier.QUALITY_RELATION_STRENGTH = 1.0
+    verifier.UNIQUENESS_MODE = "relation_attention"
+    verifier.METRIC_TEMPERATURE_INIT = 0.10
+    verifier.METRIC_SCALE_INIT = 10.0
+    verifier.DETACH_INPUTS = True
+    verifier.WEIGHT_DECAY = 0.01
+    verifier.SEMANTIC_MIL_WEIGHT = 0.05
+    verifier.RELATION_MIL_WEIGHT = 0.05
+    verifier.TRANSPORT_WARMUP_FRACTION = 0.05
+    verifier.QUERY_CHUNK_SIZE = 4
+    verifier.ACTIVATION_CHECKPOINT = True
+    # Follow outer CUDA autocast for Linear/MLP/attention GEMMs when opted in;
+    # normalization, softmax, pooling and gates remain FP32.
+    verifier.AMP_ENABLE = False
+    # The learned path never computes the old global score chain.
+    verifier.LEGACY_DIAGNOSTICS = False
+    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER = verifier
     # Independent master switches; True preserves older config behavior.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.QUALITY_ENABLE = True
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.UNIQUENESS_ENABLE = True

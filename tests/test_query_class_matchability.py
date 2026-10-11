@@ -43,11 +43,13 @@ def _cfg(**overrides):
 def test_config_enables_routing_with_independent_judgment_switches():
     cfg = get_cfg()
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE is False
+    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BACKEND == "legacy"
     assert not hasattr(cfg.FEW_SHOT, "QUERY_NULL_ROUTE")
     assert not hasattr(cfg.FEW_SHOT, "COST_AGG")
 
     cfg.merge_from_file(str(REPO_ROOT / "configs/trokens/sav.yaml"))
     assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE is True
+    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BACKEND == "learned_dual_verifier"
     # The active experiment may freely toggle these booleans in sav.yaml.
     # Functional tests below exercise both states instead of pinning the YAML.
     assert isinstance(

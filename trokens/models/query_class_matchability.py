@@ -26,7 +26,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from trokens.config.query_judgments import resolve_query_judgments
+from trokens.config.query_judgments import resolve_query_judgments, query_judgment_backend
 
 
 _PATCH_MARKER = "_query_class_matchability_original_builder"
@@ -1658,6 +1658,10 @@ def _build_frame_softmax_q2s_with_matchability(
     if not bool(_cfg_value(cfg, "ENABLE", False)):
         original = getattr(self.__class__, _PATCH_MARKER)
         return original(self, value_tokens, metadata, pred_tracks=pred_tracks)
+
+    if query_judgment_backend(cfg) == "learned_dual_verifier":
+        from trokens.models.query_evidence_verifier import build_learned_q2s_aux
+        return build_learned_q2s_aux(self, value_tokens, metadata, matchability_evidence_tokens)
 
     support_mask = metadata["support_mask"].to(device=value_tokens.device).bool()
     query_mask = ~support_mask

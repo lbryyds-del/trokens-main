@@ -373,6 +373,16 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
                     "matchability": _aux_numpy(
                         "query_class_matchability"
                     ),
+                    "learned_quality": _aux_numpy("query_quality_mass_mean"),
+                    "learned_quality_logit": _aux_numpy("query_quality_logit_mean"),
+                    "quality_anchor": _aux_numpy("query_quality_anchor_mean"),
+                    "quality_correction": _aux_numpy("query_quality_correction_mean"),
+                    "quality_correction_abs": _aux_numpy("query_quality_correction_abs_mean"),
+                    "quality_correction_saturation": _aux_numpy("query_quality_correction_saturation_mean"),
+                    "learned_relation_logit": _aux_numpy("query_relation_logit_mean"),
+                    "target_mass": _aux_numpy("query_frame_target_mass_mean"),
+                    "confuser_mass": _aux_numpy("query_frame_confuser_mass_mean"),
+                    "null_mass": _aux_numpy("query_frame_null_mass_mean"),
                     "evidence": _aux_numpy("query_class_evidence"),
                     "threshold": _aux_numpy("query_class_threshold"),
                     "support_positive": _aux_numpy(
@@ -460,6 +470,9 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
                 }
                 for name in (
                     "base_score",
+                    "learned_quality", "learned_quality_logit", "learned_relation_logit",
+                    "quality_anchor", "quality_correction", "quality_correction_abs", "quality_correction_saturation",
+                    "target_mass", "confuser_mass", "null_mass",
                     "temporal_score",
                     "matchability",
                     "evidence",
@@ -535,13 +548,19 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
                                     query_idx, episode_idx
                                 ]
                             ),
-                            "query_class_evidence": float(
-                                query_matchability_rows["evidence"][
-                                    query_idx, episode_idx
-                                ]
-                            ),
                         })
                         optional_pair_fields = {
+                            "query_class_evidence": "evidence",
+                            "query_quality_mass": "learned_quality",
+                            "query_quality_logit": "learned_quality_logit",
+                            "query_quality_anchor": "quality_anchor",
+                            "query_quality_correction": "quality_correction",
+                            "query_quality_correction_abs": "quality_correction_abs",
+                            "query_quality_correction_saturation": "quality_correction_saturation",
+                            "query_relation_logit": "learned_relation_logit",
+                            "query_target_mass": "target_mass",
+                            "query_confuser_mass": "confuser_mass",
+                            "query_null_mass": "null_mass",
                             "query_class_temporal_score": "temporal_score",
                             "query_class_positive_similarity": (
                                 "positive_similarity"

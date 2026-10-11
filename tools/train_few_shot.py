@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from datetime import datetime
 import numpy as np
 import torch
+from trokens.models.query_evidence_verifier import set_verifier_training_progress
 import torch.nn.functional as F
 from einops import rearrange
 from fvcore.common.config import CfgNode
@@ -317,6 +318,11 @@ def train_epoch(
         group_end = min(group_start + grad_accum_steps, data_size)
         group_size = group_end - group_start
         is_update_step = (cur_iter + 1) == group_end
+        updates_per_epoch = (data_size + grad_accum_steps - 1) // grad_accum_steps
+        set_verifier_training_progress(
+            model, cur_epoch * updates_per_epoch + cur_iter // grad_accum_steps,
+            cfg.SOLVER.MAX_EPOCH * updates_per_epoch,
+        )
         if cur_iter == group_start:
             optimizer.zero_grad(set_to_none=True)
         # Transfer the data to the current GPU device.

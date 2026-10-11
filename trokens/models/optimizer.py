@@ -39,6 +39,15 @@ def construct_optimizer(model, cfg):
     extra_encoder_parameters = []
     temporal_parameters = []
     temporal_zero_parameters = []
+    verifier_parameters = []
+    verifier_zero_parameters = []
+    verifier_cfg = getattr(
+        getattr(getattr(cfg, "FEW_SHOT", None), "QUERY_CLASS_MATCHABILITY", None),
+        "LEARNED_VERIFIER", None,
+    )
+    verifier_weight_decay = float(getattr(verifier_cfg, "WEIGHT_DECAY", 0.01))
+    if not torch.isfinite(torch.tensor(verifier_weight_decay)) or verifier_weight_decay < 0:
+        raise ValueError("Verifier WEIGHT_DECAY must be finite and non-negative.")
 
     temporal_cfg = getattr(
         getattr(getattr(cfg, "FEW_SHOT", None), "POT_ROUTE", None),
@@ -52,6 +61,12 @@ def construct_optimizer(model, cfg):
         skip = model.no_weight_decay()
 
     for name, p in model.named_parameters():
+        if "query_evidence_verifier" in name and p.requires_grad:
+            if p.ndim <= 1 or name.endswith(".bias"):
+                verifier_zero_parameters.append(p)
+            else:
+                verifier_parameters.append(p)
+            continue
         if "temporal_similarity_refiner" in name and p.requires_grad:
             if name.endswith(".bias"):
                 temporal_zero_parameters.append(p)
@@ -79,6 +94,8 @@ def construct_optimizer(model, cfg):
         {"params": zero_parameters + orvit_zero_parameters, "weight_decay": 0.0},
         {"params": temporal_parameters, "weight_decay": temporal_weight_decay},
         {"params": temporal_zero_parameters, "weight_decay": 0.0},
+        {"params": verifier_parameters, "weight_decay": verifier_weight_decay},
+        {"params": verifier_zero_parameters, "weight_decay": 0.0},
         {"params": extra_encoder_parameters, "lr": cfg.SOLVER.EXTRA_ENCODER_LR, 'extra_encoder': True},
     ]
 
@@ -96,7 +113,9 @@ def construct_optimizer(model, cfg):
         len(orvit_no_grad_parameters),
         len(extra_encoder_parameters),
         len(temporal_parameters),
-        len(temporal_zero_parameters)]), "parameter size does not match: {} + {} + {} + {} != {}".format(
+        len(temporal_zero_parameters),
+        len(verifier_parameters),
+        len(verifier_zero_parameters)]), "parameter size does not match: {} + {} + {} + {} != {}".format(
         len(non_bn_parameters),
         len(bn_parameters),
         len(zero_parameters),

@@ -13,7 +13,8 @@ import numpy as np
 from torch.nn.init import trunc_normal_
 
 from trokens.models.attention import TrajectoryAttentionBlock
-from trokens.config.query_judgments import resolve_query_judgments
+from trokens.config.query_judgments import resolve_query_judgments, query_judgment_backend
+from trokens.models.query_evidence_verifier import QueryEvidenceVerifier
 from trokens.models.temporal_similarity_refiner import (
     TrajectoryTemporalSimilarityRefiner,
 )
@@ -333,6 +334,24 @@ class Pointformer(nn.Module):
         # Build last so the optional branch cannot change initialization of
         # existing parameters or be overwritten by the global weight init.
         self._init_temporal_similarity_refinement()
+        self._init_query_evidence_verifier()
+
+    def _init_query_evidence_verifier(self):
+        match_cfg = getattr(self.cfg.FEW_SHOT, "QUERY_CLASS_MATCHABILITY", None)
+        self.query_evidence_verifier = None
+        judgments = resolve_query_judgments(match_cfg)
+        if query_judgment_backend(match_cfg) != "learned_dual_verifier":
+            return
+        if not (judgments.quality or judgments.uniqueness):
+            return
+        if not self.use_frame_softmax_route or not self.use_query_partial_q2s:
+            raise ValueError("The learned verifier requires the DinoTxt frame-softmax Query route.")
+        # Do not perturb the existing initialization/episode sampling RNG stream.
+        with torch.random.fork_rng(devices=[]):
+            self.query_evidence_verifier = QueryEvidenceVerifier(
+                self.embed_dim, match_cfg.LEARNED_VERIFIER,
+                quality=judgments.quality, uniqueness=judgments.uniqueness,
+            )
 
     def _init_temporal_similarity_refinement(self):
         temporal_cfg = getattr(self.pot_route_cfg, "TEMPORAL_REFINEMENT", None)
@@ -1948,6 +1967,8 @@ class Pointformer(nn.Module):
                 (judgments.uniqueness and matchability_source == "raw")
                 or (judgments.quality and absolute_mass_source == "raw")
             )
+            if query_judgment_backend(match_cfg) == "learned_dual_verifier":
+                raw_evidence_requested = judgments.quality
             if (
                 bool(getattr(match_cfg, "ENABLE", False))
                 and raw_evidence_requested

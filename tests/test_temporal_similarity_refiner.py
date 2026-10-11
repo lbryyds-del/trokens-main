@@ -17,6 +17,9 @@ from trokens.models.temporal_similarity_refiner import (
 def _sav_cfg():
     cfg = get_cfg()
     cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / "configs/trokens/sav.yaml"))
+    # These are regression tests of the old temporal + heuristic paths. The
+    # learned verifier has its own routing/temporal integration tests.
+    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BACKEND = "legacy"
     return cfg
 
 

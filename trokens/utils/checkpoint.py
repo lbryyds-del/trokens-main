@@ -331,6 +331,42 @@ def inflate_weight(state_dict_2d, state_dict_3d):
     return state_dict_inflated
 
 
+def validate_verifier_checkpoint(model, state_dict, allow_init=False):
+    """Reject random/partial learned heads at evaluation or resume.
+
+    An explicit training initialization from a legacy checkpoint may omit the
+    entire verifier. That requires resetting epoch and optimizer, not resuming.
+    """
+    verifier = getattr(model, "query_evidence_verifier", None)
+    if verifier is None:
+        return False
+    prefix = "query_evidence_verifier."
+    version_key = prefix + "architecture_version"
+    if version_key in state_dict:
+        version = state_dict[version_key]
+        if version.numel() != 1 or version.item() != verifier.architecture_version.item():
+            raise ValueError(
+                "Unsupported learned verifier checkpoint version for the configured QUALITY_MODE / UNIQUENESS_MODE. "
+                "Use semantic_attention quality with relation_attention rho for v1 or metric rho for v2; "
+                "semantic_relation quality with metric rho is v3 (relation_attention rho is v4). Changing a head requires "
+                "a new training run, not automatic resume or evaluation with an untrained head."
+            )
+    expected = {prefix + name: value for name, value in verifier.state_dict().items()}
+    missing = [name for name, value in expected.items()
+               if name not in state_dict or state_dict[name].shape != value.shape]
+    if missing:
+        if allow_init and not any(name.startswith(prefix) for name in state_dict):
+            logger.warning("Legacy checkpoint has no learned verifier: initializing BOTH requested heads; resetting epoch/optimizer.")
+            model._verifier_checkpoint_loaded = False
+            return True
+        raise ValueError(
+            "Checkpoint lacks complete learned verifier weights. Train the new heads first "
+            "or use BACKEND=legacy for the old model. Missing/mismatched: " + ", ".join(missing[:6])
+        )
+    model._verifier_checkpoint_loaded = True
+    return False
+
+
 def load_checkpoint(
     path_to_checkpoint,
     model,
@@ -343,6 +379,7 @@ def load_checkpoint(
     clear_name_pattern=(),
     replace_name_pattern=(),
     should_split_qkv=False,
+    allow_verifier_init=False,
 ):
     """
     Load the checkpoint from the given file. If inflation is True, inflate the
@@ -437,6 +474,8 @@ def load_checkpoint(
         diff = {d for d in diff if "num_batches_tracked" not in d}
         if len(diff) > 0:
             logger.warn("Not loaded {}".format(diff))
+        if validate_verifier_checkpoint(ms, state_dict, allow_verifier_init):
+            epoch_reset = True
         ms.load_state_dict(state_dict, strict=False)
         epoch = -1
     else:
@@ -450,6 +489,10 @@ def load_checkpoint(
             checkpoint["model_state"], model_state_dict_3d
         )
         if inflation:
+            # Validate the source: inflate_weight can substitute initialized
+            # model tensors for incompatible shapes, hiding an incomplete head.
+            if validate_verifier_checkpoint(ms, checkpoint["model_state"], allow_verifier_init):
+                epoch_reset = True
             # Try to inflate the model.
             inflated_model_dict = inflate_weight(
                 checkpoint["model_state"], model_state_dict_3d
@@ -509,6 +552,8 @@ def load_checkpoint(
                     preview,
                 )
             # Load pre-trained weights.
+            if validate_verifier_checkpoint(ms, pre_train_dict, allow_verifier_init):
+                epoch_reset = True
             ms.load_state_dict(pre_train_dict_match, strict=False)
             epoch = -1
 
@@ -692,6 +737,9 @@ def load_test_checkpoint(cfg, model):
         logger.info(
             "Unknown way of loading checkpoint. Using with random initialization, only for debugging."
         )
+        unwrapped = model.module if hasattr(model, "module") else model
+        validate_verifier_checkpoint(unwrapped, {})
+        epoch = -1
     return epoch
 
 
@@ -713,6 +761,7 @@ def load_train_checkpoint(cfg, model, optimizer, scaler=None):
             clear_name_pattern=cfg.TRAIN.CHECKPOINT_CLEAR_NAME_PATTERN,
             replace_name_pattern=cfg.TRAIN.CHECKPOINT_REPLACE_NAME_PATTERN,
             should_split_qkv = cfg.SPLIT_QKV_CHECKPOINT,
+            allow_verifier_init=not cfg.TRAIN.VAL_ONLY,
         )
         start_epoch = checkpoint_epoch + 1
     elif cfg.TRAIN.AUTO_RESUME and has_checkpoint(cfg.OUTPUT_DIR):
@@ -733,6 +782,11 @@ def load_train_checkpoint(cfg, model, optimizer, scaler=None):
     else:
         start_epoch = 0
 
+    if cfg.TRAIN.VAL_ONLY:
+        unwrapped = model.module if hasattr(model, "module") else model
+        if (getattr(unwrapped, "query_evidence_verifier", None) is not None
+                and not getattr(unwrapped, "_verifier_checkpoint_loaded", False)):
+            raise ValueError("VAL_ONLY requires a trained learned-verifier checkpoint.")
     return start_epoch
 
 def split_qkv(d):
