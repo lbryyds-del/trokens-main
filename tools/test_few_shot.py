@@ -19,7 +19,7 @@ from few_shot_multilabel import (
     episode_labels_from_global,
     few_shot_aux_has_query_partial_logits,
     few_shot_aux_has_support_tokens,
-    get_text_align_loss,
+    get_query_evidence_csv_fields,
     get_episode_class_ids,
     is_multilabel_episode,
     mean_or_nan,
@@ -85,19 +85,18 @@ def process_patch_tokens(cfg, support_tokens, query_tokens):
     query_tokens = F.relu(query_tokens)
     num_supports = support_tokens.shape[0]
     num_querries = query_tokens.shape[0]
-    if not cfg.MODEL.USE_EXTRA_ENCODER:
-        if cfg.FEW_SHOT.PATCH_TOKENS_AGG == 'temporal':
-            support_tokens = support_tokens.mean(dim=1)
-            query_tokens = query_tokens.mean(dim=1)
-        elif cfg.FEW_SHOT.PATCH_TOKENS_AGG == 'spatial':
-            support_tokens = support_tokens.mean(dim=2)
-            query_tokens = query_tokens.mean(dim=2)
-        elif cfg.FEW_SHOT.PATCH_TOKENS_AGG == 'no_agg':
-            support_tokens = rearrange(support_tokens, 'b t p e -> b (t p) e')
-            query_tokens = rearrange(query_tokens, 'b t p e -> b (t p) e')
-        else:
-            raise NotImplementedError(
-                f"Aggregation method {cfg.FEW_SHOT.PATCH_TOKENS_AGG} not implemented")
+    if cfg.FEW_SHOT.PATCH_TOKENS_AGG == 'temporal':
+        support_tokens = support_tokens.mean(dim=1)
+        query_tokens = query_tokens.mean(dim=1)
+    elif cfg.FEW_SHOT.PATCH_TOKENS_AGG == 'spatial':
+        support_tokens = support_tokens.mean(dim=2)
+        query_tokens = query_tokens.mean(dim=2)
+    elif cfg.FEW_SHOT.PATCH_TOKENS_AGG == 'no_agg':
+        support_tokens = rearrange(support_tokens, 'b t p e -> b (t p) e')
+        query_tokens = rearrange(query_tokens, 'b t p e -> b (t p) e')
+    else:
+        raise NotImplementedError(
+            f"Aggregation method {cfg.FEW_SHOT.PATCH_TOKENS_AGG} not implemented")
 
     support_tokens = rearrange(support_tokens, 'b p e -> (b p) e')
     query_tokens = rearrange(query_tokens, 'b p e -> (b p) e')
@@ -215,10 +214,6 @@ def shot_metric_name(cfg):
     return f"shot_{cfg.FEW_SHOT.K_SHOT}_acc"
 
 
-
-
-
-
 @torch.no_grad()
 def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
     """
@@ -239,7 +234,6 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
     val_meter.iter_tic()
     epoch_top_1_acc_few_shot = []
     epoch_q2s_loss = []
-    epoch_align_loss = []
     multi_label = cfg.DATA.MULTI_LABEL
     if multi_label:
         ap_storage = empty_ap_storage(cfg.MODEL.NUM_CLASSES)
@@ -287,7 +281,6 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
                 few_shot_aux = None
             if isinstance(preds, tuple):
                 preds, _ = preds
-            align_loss = get_text_align_loss(few_shot_aux, patch_tokens)
 
             multilabel_episode = is_multilabel_episode(cfg, labels, meta)
             if multilabel_episode:
@@ -349,299 +342,17 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
             )
             scores = patch_q2s_logits.detach().float().cpu().numpy()
             targets = q2s_labels.detach().float().cpu().numpy()
-            query_matchability_rows = None
-            if (
-                isinstance(few_shot_aux, dict)
-                and "query_class_matchability" in few_shot_aux
-            ):
-                def _aux_numpy(key, dtype=torch.float32):
-                    value = few_shot_aux.get(key)
-                    if value is None:
-                        return None
-                    value = value.detach().cpu()
-                    if dtype is torch.bool:
-                        return value.bool().numpy()
-                    return value.float().numpy()
-
-                query_matchability_rows = {
-                    "base_score": _aux_numpy(
-                        "query_partial_q2s_base_logits"
-                    ),
-                    "temporal_score": _aux_numpy(
-                        "query_partial_q2s_temporal_logits"
-                    ),
-                    "matchability": _aux_numpy(
-                        "query_class_matchability"
-                    ),
-                    "learned_quality": _aux_numpy("query_quality_mass_mean"),
-                    "learned_quality_logit": _aux_numpy("query_quality_logit_mean"),
-                    "quality_anchor": _aux_numpy("query_quality_anchor_mean"),
-                    "quality_correction": _aux_numpy("query_quality_correction_mean"),
-                    "quality_correction_abs": _aux_numpy("query_quality_correction_abs_mean"),
-                    "quality_correction_saturation": _aux_numpy("query_quality_correction_saturation_mean"),
-                    "learned_relation_logit": _aux_numpy("query_relation_logit_mean"),
-                    "target_mass": _aux_numpy("query_frame_target_mass_mean"),
-                    "confuser_mass": _aux_numpy("query_frame_confuser_mass_mean"),
-                    "null_mass": _aux_numpy("query_frame_null_mass_mean"),
-                    "evidence": _aux_numpy("query_class_evidence"),
-                    "threshold": _aux_numpy("query_class_threshold"),
-                    "support_positive": _aux_numpy(
-                        "support_positive_evidence_mean"
-                    ),
-                    "support_negative": _aux_numpy(
-                        "support_negative_evidence_mean"
-                    ),
-                    "support_gap": _aux_numpy("support_evidence_gap"),
-                    "support_reliable": _aux_numpy(
-                        "support_calibration_reliable", dtype=torch.bool
-                    ),
-                    "confuser_available": _aux_numpy(
-                        "query_class_confuser_available", dtype=torch.bool
-                    ),
-                    "positive_similarity": _aux_numpy(
-                        "query_class_positive_similarity"
-                    ),
-                    "hardest_confuser_similarity": _aux_numpy(
-                        "query_class_hardest_confuser_similarity"
-                    ),
-                    "relative_margin": _aux_numpy(
-                        "query_class_relative_margin"
-                    ),
-                    "hardest_confuser_index": _aux_numpy(
-                        "query_class_hardest_confuser_support_index",
-                        dtype=torch.long,
-                    ),
-                    "confuser_valid_count": _aux_numpy(
-                        "query_class_confuser_valid_count",
-                        dtype=torch.long,
-                    ),
-                    "frame_positive_evidence": _aux_numpy(
-                        "query_frame_positive_evidence_mean"
-                    ),
-                    "frame_confuser_evidence": _aux_numpy(
-                        "query_frame_confuser_evidence_mean"
-                    ),
-                    "frame_margin": _aux_numpy(
-                        "query_frame_relative_margin_mean"
-                    ),
-                    "frame_matchability": _aux_numpy(
-                        "query_frame_matchability_mean"
-                    ),
-                    "frame_effective_patches": _aux_numpy(
-                        "query_evidence_effective_patches_mean"
-                    ),
-                    "frame_top1_mass": _aux_numpy(
-                        "query_evidence_top1_mass_mean"
-                    ),
-                    "frame_temporal_delta": _aux_numpy(
-                        "query_frame_temporal_logit_delta"
-                    ),
-                    "frame_max_t_switch": _aux_numpy(
-                        "query_frame_max_t_switch_fraction"
-                    ),
-                    "absolute_evidence": _aux_numpy(
-                        "query_frame_absolute_evidence_mean"
-                    ),
-                    "transport_patch_mass": _aux_numpy(
-                        "query_frame_patch_mass_mean"
-                    ),
-                    "transport_unmatched_mass": _aux_numpy(
-                        "query_frame_unmatched_mass_mean"
-                    ),
-                    "transport_logit_delta": _aux_numpy(
-                        "query_frame_transport_logit_delta"
-                    ),
-                    "absolute_threshold": _aux_numpy(
-                        "query_absolute_mass_threshold"
-                    ),
-                    "support_absolute_positive": _aux_numpy(
-                        "support_absolute_positive_evidence_mean"
-                    ),
-                    "support_absolute_negative": _aux_numpy(
-                        "support_absolute_negative_evidence_mean"
-                    ),
-                    "support_absolute_gap": _aux_numpy(
-                        "support_absolute_evidence_gap"
-                    ),
-                    "support_absolute_reliable": _aux_numpy(
-                        "support_absolute_calibration_reliable",
-                        dtype=torch.bool,
-                    ),
-                }
-                for name in (
-                    "base_score",
-                    "learned_quality", "learned_quality_logit", "learned_relation_logit",
-                    "quality_anchor", "quality_correction", "quality_correction_abs", "quality_correction_saturation",
-                    "target_mass", "confuser_mass", "null_mass",
-                    "temporal_score",
-                    "matchability",
-                    "evidence",
-                    "positive_similarity",
-                    "hardest_confuser_similarity",
-                    "relative_margin",
-                    "hardest_confuser_index",
-                    "frame_positive_evidence",
-                    "frame_confuser_evidence",
-                    "frame_margin",
-                    "frame_matchability",
-                    "frame_effective_patches",
-                    "frame_top1_mass",
-                    "frame_temporal_delta",
-                    "frame_max_t_switch",
-                    "absolute_evidence",
-                    "transport_patch_mass",
-                    "transport_unmatched_mass",
-                    "transport_logit_delta",
-                ):
-                    if query_matchability_rows[name] is None:
-                        continue
-                    if query_matchability_rows[name].shape != targets.shape:
-                        raise ValueError(
-                            f"{name} must align with q2s labels; got "
-                            f"{query_matchability_rows[name].shape}, expected "
-                            f"{targets.shape}."
-                        )
-                for name in (
-                    "threshold",
-                    "support_positive",
-                    "support_negative",
-                    "support_gap",
-                    "support_reliable",
-                    "confuser_available",
-                    "confuser_valid_count",
-                    "absolute_threshold",
-                    "support_absolute_positive",
-                    "support_absolute_negative",
-                    "support_absolute_gap",
-                    "support_absolute_reliable",
-                ):
-                    if query_matchability_rows[name] is not None and (
-                        query_matchability_rows[name].shape[-1:]
-                        != targets.shape[-1:]
-                    ):
-                        raise ValueError(
-                            f"{name} must align with the episode class axis; got "
-                            f"{query_matchability_rows[name].shape}, expected "
-                            f"[..., {targets.shape[-1]}]."
-                        )
+            query_fields = get_query_evidence_csv_fields(few_shot_aux, q2s_labels)
             for query_idx, video_name in enumerate(video_names):
                 for episode_idx, class_id in enumerate(episode_class_ids):
                     row = {
-                        'video_name': video_name,
-                        'class_id': int(class_id),
-                        'score': float(scores[query_idx, episode_idx]),
-                        'label': float(targets[query_idx, episode_idx]),
+                        "video_name": video_name,
+                        "class_id": int(class_id),
+                        "score": float(scores[query_idx, episode_idx]),
+                        "label": float(targets[query_idx, episode_idx]),
                     }
-                    if (
-                        query_matchability_rows is not None
-                        and query_matchability_rows["matchability"].shape
-                        == targets.shape
-                    ):
-                        row.update({
-                            "query_class_base_score": float(
-                                query_matchability_rows["base_score"][
-                                    query_idx, episode_idx
-                                ]
-                            ),
-                            "query_class_matchability": float(
-                                query_matchability_rows["matchability"][
-                                    query_idx, episode_idx
-                                ]
-                            ),
-                        })
-                        optional_pair_fields = {
-                            "query_class_evidence": "evidence",
-                            "query_quality_mass": "learned_quality",
-                            "query_quality_logit": "learned_quality_logit",
-                            "query_quality_anchor": "quality_anchor",
-                            "query_quality_correction": "quality_correction",
-                            "query_quality_correction_abs": "quality_correction_abs",
-                            "query_quality_correction_saturation": "quality_correction_saturation",
-                            "query_relation_logit": "learned_relation_logit",
-                            "query_target_mass": "target_mass",
-                            "query_confuser_mass": "confuser_mass",
-                            "query_null_mass": "null_mass",
-                            "query_class_temporal_score": "temporal_score",
-                            "query_class_positive_similarity": (
-                                "positive_similarity"
-                            ),
-                            "query_class_hardest_confuser_similarity": (
-                                "hardest_confuser_similarity"
-                            ),
-                            "query_class_relative_margin": "relative_margin",
-                            "query_class_hardest_confuser_support_index": (
-                                "hardest_confuser_index"
-                            ),
-                            "query_frame_positive_evidence": (
-                                "frame_positive_evidence"
-                            ),
-                            "query_frame_confuser_evidence": (
-                                "frame_confuser_evidence"
-                            ),
-                            "query_frame_relative_margin": "frame_margin",
-                            "query_frame_matchability": "frame_matchability",
-                            "query_evidence_effective_patches": (
-                                "frame_effective_patches"
-                            ),
-                            "query_evidence_top1_mass": "frame_top1_mass",
-                            "query_frame_temporal_logit_delta": (
-                                "frame_temporal_delta"
-                            ),
-                            "query_frame_max_t_switch_fraction": (
-                                "frame_max_t_switch"
-                            ),
-                            "query_frame_absolute_evidence": (
-                                "absolute_evidence"
-                            ),
-                            "query_frame_patch_mass": "transport_patch_mass",
-                            "query_frame_unmatched_mass": (
-                                "transport_unmatched_mass"
-                            ),
-                            "query_frame_transport_logit_delta": (
-                                "transport_logit_delta"
-                            ),
-                        }
-                        for output_name, source_name in optional_pair_fields.items():
-                            values = query_matchability_rows[source_name]
-                            if values is not None:
-                                row[output_name] = float(
-                                    values[query_idx, episode_idx]
-                                )
-                        optional_class_fields = {
-                            "query_class_threshold": "threshold",
-                            "support_positive_evidence_mean": "support_positive",
-                            "support_negative_evidence_mean": "support_negative",
-                            "support_evidence_gap": "support_gap",
-                            "support_calibration_reliable": "support_reliable",
-                            "query_class_confuser_available": "confuser_available",
-                            "query_class_confuser_valid_count": "confuser_valid_count",
-                            "query_absolute_mass_threshold": "absolute_threshold",
-                            "support_absolute_positive_evidence_mean": (
-                                "support_absolute_positive"
-                            ),
-                            "support_absolute_negative_evidence_mean": (
-                                "support_absolute_negative"
-                            ),
-                            "support_absolute_evidence_gap": (
-                                "support_absolute_gap"
-                            ),
-                            "support_absolute_calibration_reliable": (
-                                "support_absolute_reliable"
-                            ),
-                        }
-                        for output_name, source_name in optional_class_fields.items():
-                            values = query_matchability_rows[source_name]
-                            if values is None:
-                                continue
-                            value = values[episode_idx]
-                            row[output_name] = (
-                                bool(value)
-                                if source_name in {
-                                    "support_reliable",
-                                    "support_absolute_reliable",
-                                }
-                                else float(value)
-                            )
+                    row.update({name: float(values[query_idx, episode_idx])
+                                for name, values in query_fields.items()})
                     all_df.append(row)
         if cfg['wandb']:
             cfg['wandb'].log({
@@ -650,16 +361,14 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
             })
 
         if cfg.NUM_GPUS > 1:
-            few_shot_top1_acc, q2s_loss, align_loss = du.all_reduce(
-                [few_shot_top1_acc, q2s_loss, align_loss]
+            few_shot_top1_acc, q2s_loss = du.all_reduce(
+                [few_shot_top1_acc, q2s_loss]
             )
 
         # Copy the errors from GPU to CPU (sync point).
         few_shot_top1_acc = few_shot_top1_acc.item()
         q2s_loss = q2s_loss.item()
-        align_loss = align_loss.item()
         epoch_q2s_loss.append(q2s_loss)
-        epoch_align_loss.append(align_loss)
         epoch_top_1_acc_few_shot.append(few_shot_top1_acc)
 
         if not multilabel_episode:
@@ -688,7 +397,6 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
             * max(
                 cfg.NUM_GPUS, 1
             ),  # If running  on CPU (cfg.NUM_GPUS == 1), use 1 to represent 1 CPU.
-            extra_metrices={"align_loss": align_loss},
         )
 
 
@@ -701,7 +409,6 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
                 {
                     shot_acc_name: f"{few_shot_top1_acc:.2f}",
                     "q2s_loss": f"{q2s_loss:.3f}",
-                    "align_loss": f"{align_loss:.3f}",
                 },
                 refresh=False,
             )
@@ -713,7 +420,6 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
     val_meter.log_epoch_stats(cur_epoch)
     log_dict = {
         'test_q2s_loss': mean_or_nan(epoch_q2s_loss),
-        'test_align_loss': mean_or_nan(epoch_align_loss),
         'test_top1_acc_few_shot': mean_or_nan(epoch_top_1_acc_few_shot),
         'epoch': cur_epoch}
     if multi_label:
@@ -785,7 +491,6 @@ def calculate_and_update_precise_bn(loader, model, num_iters=200, use_gpu=True):
 
     # Update the bn stats.
     update_bn_stats(model, _gen_loader(), num_iters)
-
 
 
 def test_few_shot(cfg, args, wandb_run=None):

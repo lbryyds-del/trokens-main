@@ -205,14 +205,12 @@ def test_frame_softmax_fusion_conditions_query_only_and_ignores_query_targets():
         patch_tokens,
         sample_mask,
         label_text_features,
-        temporal_point_mask=None,
     ):
         routed_text.append(label_text_features.detach().clone())
         return original_compute(
             patch_tokens,
             sample_mask,
             label_text_features,
-            temporal_point_mask=temporal_point_mask,
         )
 
     model._compute_batched_frame_softmax_text_prototypes = record_routed_text

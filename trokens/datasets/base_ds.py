@@ -17,7 +17,7 @@ from . import utils
 
 from .point_sampler import point_sampler, temp_seed
 from . import autoaugment
-from .hod import get_orientation_hist, compute_temporal_pyramid
+from .hod import get_orientation_hist
 
 
 logger = logging.get_logger(__name__)
@@ -133,12 +133,6 @@ class BaseDataset(torch.utils.data.Dataset):
         )
         self._construct_loader()
 
-        self.aug = False
-        self.rand_erase = False
-        if self.mode == "train" and self.cfg.AUG.ENABLE:
-            self.aug = True
-            if self.cfg.AUG.RE_PROB > 0:
-                self.rand_erase = True
         if self.cfg.MODEL.FEAT_EXTRACTOR in ['dino', 'clip_vit_b16',
                                               'dinotxt_vitl14_reg4',
                                               'resnet', 'vit', 'conv']:
@@ -236,7 +230,6 @@ class BaseDataset(torch.utils.data.Dataset):
                                     total_frames=pred_tracks.shape[0],
                                     indices_to_take=index_select)
         video = self._ensure_rgb_video(video)
-
 
 
         if self.cfg.DATA.USE_RAND_AUGMENT and self.mode in ["train"]:
@@ -343,25 +336,16 @@ class BaseDataset(torch.utils.data.Dataset):
         pt_query_mask = pt_query_mask[index_select]
 
         if self.cfg.POINT_INFO.HOD.GET_FEAT:
-            if (self.cfg.POINT_INFO.HOD.TEMPORAL_PYRAMID or
-                self.cfg.POINT_INFO.HOD.PRESERVE_TEMPORAL):
-                preserve_temporal = True
-            else:
-                preserve_temporal = False
+            preserve_temporal = self.cfg.POINT_INFO.HOD.PRESERVE_TEMPORAL
             pt_for_hod = rearrange(pt_to_take.numpy(), 't n d -> n t d')
             hod_feat = torch.tensor(get_orientation_hist(
                                                     pt_for_hod,
                                                     self.cfg.POINT_INFO.HOD.NUM_BINS,
                                                     preserve_temporal=preserve_temporal))
-            if self.cfg.POINT_INFO.HOD.TEMPORAL_PYRAMID:
-                hod_feat = compute_temporal_pyramid(
-                    hod_feat, self.cfg.POINT_INFO.HOD.TEMPORAL_PYRAMID_LEVELS)
-            if (not self.cfg.POINT_INFO.HOD.PRESERVE_TEMPORAL or
-                self.cfg.POINT_INFO.HOD.TEMPORAL_PYRAMID):
+            if not self.cfg.POINT_INFO.HOD.PRESERVE_TEMPORAL:
                 # broadcast the hod_feat to the temporal dimension
                 hod_feat = hod_feat.unsqueeze(1).repeat(1, self.cfg.DATA.NUM_FRAMES, 1)
             metadata['hod_feat'] = hod_feat
-
 
 
         metadata['pred_tracks'] = pt_to_take
@@ -376,12 +360,6 @@ class BaseDataset(torch.utils.data.Dataset):
         if episode_class_ids is not None:
             metadata['episode_class_ids'] = episode_class_ids
 
-
-        if self.cfg.DATA.BOTH_DIRECTION:
-            if 'reverse' in self._feat_paths[index]:
-                metadata['reverse'] = True
-            else:
-                metadata['reverse'] = False
 
         label = self._labels[index]
         vid_id = self.dict_vid_id[index // self._num_clips]

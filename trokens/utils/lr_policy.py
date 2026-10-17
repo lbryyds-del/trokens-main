@@ -16,8 +16,6 @@ def get_lr_at_epoch(cfg, cur_epoch):
         cur_epoch (float): the number of epoch of the current training stage.
     """
     base_lrs = {'lr':cfg.SOLVER.BASE_LR}
-    if cfg.SOLVER.ORVIT_BASE_LR > 0:
-        base_lrs['orvit_lr'] = cfg.SOLVER.ORVIT_BASE_LR
     ret = {}
     for name, base_lr in base_lrs.items():
         lr = get_lr_func(cfg.SOLVER.LR_POLICY)(cfg, cur_epoch, base_lr=base_lr)

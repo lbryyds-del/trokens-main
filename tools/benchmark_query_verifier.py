@@ -1,12 +1,10 @@
-"""Compare verifier implementations/architectures, without training.
+"""Benchmark precision and checkpointing for the default Query evidence path.
 
 Run from the repo root with CUDA_VISIBLE_DEVICES set to an idle GPU. Models do
 forward/backward only: no optimizer updates, checkpoint writes or DDP workers.
-The sequential reference is test-only, not the heuristic BACKEND=legacy.
 """
 
 import argparse
-import importlib.util
 import json
 from pathlib import Path
 import random
@@ -24,17 +22,8 @@ from torch import nn
 from trokens.config.defaults import get_cfg
 from trokens.models.pointformer import Pointformer
 from tools.few_shot_multilabel import (
-    compute_query_partial_q2s_loss, get_text_align_loss, multilabel_classification_loss,
+    compute_query_partial_q2s_loss, multilabel_classification_loss,
 )
-
-
-def _reference_type():
-    spec = importlib.util.spec_from_file_location(
-        "verifier_benchmark_reference", REPO_ROOT / "tests/reference_query_verifier.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.SequentialQueryEvidenceVerifier
 
 
 def _synthetic_route(cfg):
@@ -45,7 +34,6 @@ def _synthetic_route(cfg):
     model.use_frame_softmax_route = model.use_query_partial_q2s = True
     model.use_support_text_fusion = cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.ENABLE
     model.support_text_fusion_cfg = cfg.FEW_SHOT.SUPPORT_TEXT_FUSION
-    model._init_temporal_similarity_refinement()
     model._init_query_evidence_verifier()
     model.cuda().train()
     k, t, n, d = cfg.FEW_SHOT.N_WAY, cfg.DATA.NUM_FRAMES, cfg.POINT_INFO.NUM_POINTS_TO_SAMPLE, 1024
@@ -97,8 +85,7 @@ def _real_episode(cfg):
             aux["query_partial_q2s_logits"], meta["episode_positive_labels"][~support], aux, cfg,
         )
         loss = (cfg.FEW_SHOT.CLASS_LOSS_LAMBDA * cls_loss
-                + cfg.FEW_SHOT.Q2S_LOSS_LAMBDA * q2s_loss
-                + cfg.FEW_SHOT.TEXT_ALIGN.LOSS_WEIGHT * get_text_align_loss(aux, patch_tokens))
+                + cfg.FEW_SHOT.Q2S_LOSS_LAMBDA * q2s_loss)
         return loss, aux
 
     return model, forward, dict(Q=int((~support).sum()), S=int(support.sum()), K=classes.numel(),
@@ -112,10 +99,8 @@ def main():
     parser.add_argument("--shot", type=int, default=1)
     parser.add_argument("--steps", type=int, default=8)
     parser.add_argument("--warmup", type=int, default=2)
-    parser.add_argument("--variants", nargs="+", default=[
-        "sequential", "batched_fp32", "batched_fp32_large", "batched_amp"],
-        choices=("sequential", "batched_fp32", "batched_fp32_large", "batched_amp",
-                 "metric_fp32", "metric_amp", "semantic_fp32", "semantic_amp"))
+    parser.add_argument("--variants", nargs="+", default=["fp32", "amp"],
+                        choices=("fp32", "amp", "checkpoint"))
     parser.add_argument("--loss-scale", type=float, default=1024.0,
                         help="Scale backward then unscale gradients; no optimizer step is performed")
     args = parser.parse_args()
@@ -131,10 +116,6 @@ def main():
     cfg = get_cfg()
     cfg.merge_from_file(args.cfg)
     cfg.NUM_GPUS, cfg.FEW_SHOT.K_SHOT = 1, args.shot
-    # Canonical v1 seed supplies weights for unchanged heads only. v3 quality
-    # uses a separate fixed seed, shared by its FP32/AMP benchmark variants.
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER.QUALITY_MODE = "semantic_attention"
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER.UNIQUENESS_MODE = "relation_attention"
     model, forward, shapes = (_real_episode if args.mode == "episode" else _synthetic_route)(cfg)
     optimized = model.query_evidence_verifier
     if optimized is None:
@@ -146,22 +127,13 @@ def main():
     versions = {}
     for name in args.variants:
         vc = cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER.clone()
-        vc.AMP_ENABLE = name in ("batched_amp", "metric_amp", "semantic_amp")
-        vc.QUALITY_MODE = "semantic_relation" if name.startswith("semantic_") else "semantic_attention"
-        vc.UNIQUENESS_MODE = "metric" if name.startswith(("metric_", "semantic_")) else "relation_attention"
-        if name in ("sequential", "batched_fp32"):
-            vc.QUERY_CHUNK_SIZE, vc.ACTIVATION_CHECKPOINT = 4, True
-        cls = _reference_type() if name == "sequential" else type(optimized)
+        vc.AMP_ENABLE = name == "amp"
+        vc.ACTIVATION_CHECKPOINT = name == "checkpoint"
+        if name == "checkpoint":
+            vc.QUERY_CHUNK_SIZE = 4
         with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
-            torch.manual_seed(779)
-            verifier = cls(model.embed_dim, vc, optimized.quality, optimized.uniqueness).cuda().train()
-        if name.startswith(("metric_", "semantic_")):
-            state = verifier.state_dict()
-            state.update({key: value for key, value in optimized.state_dict().items()
-                          if key in state and key != "architecture_version"})
-            verifier.load_state_dict(state, strict=True)
-        else:
-            verifier.load_state_dict(optimized.state_dict(), strict=True)
+            verifier = type(optimized)(model.embed_dim, vc, optimized.quality, optimized.uniqueness).cuda().train()
+        verifier.load_state_dict(optimized.state_dict(), strict=True)
         versions[name] = verifier
     model.query_evidence_verifier = next(iter(versions.values()))
     del optimized
@@ -169,7 +141,6 @@ def main():
                           gpu=torch.cuda.get_device_name(), tf32=torch.backends.cuda.matmul.allow_tf32,
                           variants={name: dict(chunk=v.chunk_size, checkpoint=v.activation_checkpoint,
                                     amp=getattr(v, "amp_enabled", False),
-                                    quality_mode=getattr(v, "quality_mode", "semantic_attention"),
                                     architecture_version=int(v.architecture_version),
                                     parameters=sum(p.numel() for p in v.parameters()))
                                     for name, v in versions.items()},
@@ -221,29 +192,14 @@ def main():
     errors = {}
     for name, actual in zip(list(versions)[1:], checks[1:]):
         mixed = any(getattr(versions[v], "amp_enabled", False) for v in (args.variants[0], name))
-        cross_architecture = versions[name].architecture_version != versions[args.variants[0]].architecture_version
         errors[name] = {}
         for kind, left, right in zip(("outputs", "verifier_gradients"), checks[0], actual):
-            if cross_architecture:
-                # Changed heads/g/loss and all loss gradients intentionally
-                # differ. Compare the base route and only unchanged heads.
-                if kind == "verifier_gradients":
-                    continue
-                unchanged = ["query_partial_q2s_base_logits",
-                             "query_partial_query_prototypes", "query_partial_support_prototypes",
-                             "query_patch_conditional_weights"]
-                before, after = versions[args.variants[0]], versions[name]
-                if getattr(before, "quality_mode", "semantic_attention") == getattr(after, "quality_mode", "semantic_attention"):
-                    unchanged.append("query_quality_logits")
-                if getattr(before, "uniqueness_mode", "relation_attention") == getattr(after, "uniqueness_mode", "relation_attention"):
-                    unchanged.append("query_relation_logits")
-                left, right = ({k: data[k] for k in unchanged if k in data} for data in (left, right))
             atol, rtol = ((2e-3, 5e-3) if kind == "outputs" else (2e-4, 1e-2)) if mixed else (5e-6, 5e-5)
             for key in left:
                 torch.testing.assert_close(left[key], right[key], atol=atol, rtol=rtol,
                                            msg=lambda detail, key=key: f"{name}: {key}\n{detail}")
             errors[name][kind + "_max_abs_error"] = max(float((left[key] - right[key]).abs().max()) for key in left)
-        errors[name]["scope"] = "base_route_and_unchanged_heads_only" if cross_architecture else "full_equivalence"
+        errors[name]["scope"] = "full_equivalence"
     print(json.dumps(dict(equivalence=errors, finite_scaled_gradients=True)), flush=True)
     del checks
     for _ in range(args.warmup):

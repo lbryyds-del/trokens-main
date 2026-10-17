@@ -94,6 +94,20 @@ def construct_loader(cfg, split, is_precise_bn=False, less_iters=False):
             `val`, and `test`.
     """
     assert split in ["train", "val", "test"]
+    dataset_name = cfg.TEST.DATASET if split == "test" else cfg.TRAIN.DATASET
+    dataset = build_dataset(dataset_name, cfg, split)
+    if cfg.TASK == 'few_shot':
+        sampler = FewShotEpisodeSampler(dataset, cfg, split, less_iters)
+        loader = torch.utils.data.DataLoader(
+            dataset,
+            batch_sampler=sampler,
+            num_workers=cfg.DATA_LOADER.NUM_WORKERS,
+            pin_memory=cfg.DATA_LOADER.PIN_MEMORY,
+            worker_init_fn=utils.loader_worker_init_fn(dataset),
+        )
+        return loader
+
+
     if split in ["train"]:
         dataset_name = cfg.TRAIN.DATASET
         batch_size = int(cfg.TRAIN.BATCH_SIZE / max(1, cfg.NUM_GPUS))
@@ -115,19 +129,6 @@ def construct_loader(cfg, split, is_precise_bn=False, less_iters=False):
         shuffle = None
         drop_last = None
 
-
-    # Construct the dataset
-    dataset = build_dataset(dataset_name, cfg, split)
-    if cfg.TASK == 'few_shot':
-        sampler = FewShotEpisodeSampler(dataset, cfg, split, less_iters)
-        loader = torch.utils.data.DataLoader(
-            dataset,
-            batch_sampler=sampler,
-            num_workers=cfg.DATA_LOADER.NUM_WORKERS,
-            pin_memory=cfg.DATA_LOADER.PIN_MEMORY,
-            worker_init_fn=utils.loader_worker_init_fn(dataset),
-        )
-        return loader
 
     if isinstance(dataset, torch.utils.data.IterableDataset):
         loader = torch.utils.data.DataLoader(

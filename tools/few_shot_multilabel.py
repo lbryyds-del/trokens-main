@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from sklearn.metrics import average_precision_score
 
 import trokens.utils.distributed as du
-from trokens.config.query_judgments import resolve_query_judgments, query_judgment_backend
+from trokens.config.query_judgments import resolve_query_judgments
 
 
 def q2s_cos_sim_fp32(x, y, epsilon=0.01):
@@ -172,88 +172,6 @@ def few_shot_aux_has_query_partial_logits(few_shot_aux):
     )
 
 
-def compute_evidence_mil_loss(
-    frame_margins,
-    frame_valid,
-    labels,
-    topk_frames=3,
-    temperature=0.10,
-):
-    """Supervise the strongest valid frame margins with video labels.
-
-    This is deliberately a video-level MIL objective: it never consumes a
-    patch or frame target.  Positive and Confuser responses have already been
-    compared on the same Evidence-map region, and only the strongest valid
-    frame margins are averaged for each Query/class pair.  Pairs without a
-    valid Positive/Confuser comparison are excluded rather than trained toward
-    an arbitrary zero margin.
-    """
-    if not isinstance(frame_margins, torch.Tensor):
-        raise TypeError("frame_margins must be a Tensor.")
-    if not isinstance(frame_valid, torch.Tensor):
-        raise TypeError("frame_valid must be a Tensor.")
-    if not isinstance(labels, torch.Tensor):
-        raise TypeError("labels must be a Tensor.")
-    if frame_margins.ndim != 3:
-        raise ValueError(
-            "frame_margins must have shape [Q,K,T]; got "
-            f"{tuple(frame_margins.shape)}."
-        )
-    if tuple(frame_valid.shape) != tuple(frame_margins.shape):
-        raise ValueError(
-            "frame_valid must match frame_margins; got "
-            f"{tuple(frame_valid.shape)} and {tuple(frame_margins.shape)}."
-        )
-    if tuple(labels.shape) != tuple(frame_margins.shape[:2]):
-        raise ValueError(
-            "labels must match the Query/class axes of frame_margins; got "
-            f"{tuple(labels.shape)} and {tuple(frame_margins.shape[:2])}."
-        )
-    topk_frames = int(topk_frames)
-    temperature = float(temperature)
-    if topk_frames <= 0:
-        raise ValueError("EVIDENCE_VIDEO_TOPK_FRAMES must be positive.")
-    if not np.isfinite(temperature) or temperature <= 0.0:
-        raise ValueError("EVIDENCE_MIL_TEMPERATURE must be finite and positive.")
-
-    margins = torch.nan_to_num(
-        frame_margins.float(),
-        nan=0.0,
-        posinf=1.0,
-        neginf=-1.0,
-    )
-    valid = frame_valid.to(device=margins.device).bool()
-    topk = min(topk_frames, margins.shape[-1])
-    masked = margins.masked_fill(~valid, float("-inf"))
-    values, indices = torch.topk(masked, k=topk, dim=-1)
-    selected_valid = torch.gather(valid, -1, indices)
-    values = torch.where(selected_valid, values, torch.zeros_like(values))
-    counts = selected_valid.sum(dim=-1)
-    video_margin = values.sum(dim=-1) / counts.clamp_min(1).to(values.dtype)
-    pair_valid = counts.gt(0)
-    mil_logits = torch.nan_to_num(
-        video_margin / temperature,
-        nan=0.0,
-        posinf=30.0,
-        neginf=-30.0,
-    )
-    if pair_valid.any():
-        loss = F.binary_cross_entropy_with_logits(
-            mil_logits[pair_valid],
-            labels.float().to(device=margins.device)[pair_valid],
-        )
-    else:
-        # Preserve a differentiable scalar on the correct device without
-        # manufacturing supervision for an episode that has no Confuser.
-        loss = margins.sum() * 0.0
-    return {
-        "loss": loss,
-        "video_margin": video_margin,
-        "logits": mil_logits,
-        "valid": pair_valid,
-    }
-
-
 def compute_learned_evidence_mil_loss(frame_logits, frame_valid, labels):
     """Video-label supervision without a Top-K or calibrated temperature.
 
@@ -323,7 +241,7 @@ def compute_query_partial_q2s_loss(
         )
 
     match_cfg = getattr(getattr(cfg, "FEW_SHOT", None), "QUERY_CLASS_MATCHABILITY", None)
-    learned = query_judgment_backend(match_cfg) == "learned_dual_verifier"
+    learned = bool(getattr(match_cfg, "ENABLE", False))
     labels = q2s_labels.float()
     def supervised_bce(logits):
         if not learned:
@@ -339,20 +257,8 @@ def compute_query_partial_q2s_loss(
     }
 
     dual_enabled = bool(getattr(match_cfg, "DUAL_LOGIT_LOSS_ENABLE", False))
-    evidence_mil_weight = 0.0 if learned else float(
-        getattr(match_cfg, "EVIDENCE_MIL_LOSS_WEIGHT", 0.0)
-    )
-    if not np.isfinite(evidence_mil_weight) or evidence_mil_weight < 0.0:
-        raise ValueError(
-            "EVIDENCE_MIL_LOSS_WEIGHT must be finite and non-negative."
-        )
-    if not resolve_query_judgments(match_cfg).frame_verification:
-        evidence_mil_weight = 0.0
     learned_aux_loss = verified_loss.new_zeros(())
     if learned:
-        # No legacy margin/Top-K MIL is evaluated, even if retained YAML fields
-        # still carry their old nonzero values for other backend configurations.
-        evidence_mil_weight = 0.0
         judgments = resolve_query_judgments(match_cfg)
         verifier_cfg = getattr(match_cfg, "LEARNED_VERIFIER", None)
         for name, enabled, weight_name in (
@@ -365,7 +271,7 @@ def compute_query_partial_q2s_loss(
             if not np.isfinite(weight) or weight < 0:
                 raise ValueError(f"{weight_name} must be finite and non-negative.")
             if not isinstance(few_shot_aux, dict) or f"query_{name}_logits" not in few_shot_aux:
-                raise ValueError(f"Learned {name} MIL requires new verifier logits, not legacy margins.")
+                raise ValueError(f"Learned {name} MIL requires verifier logits.")
             mil = compute_learned_evidence_mil_loss(
                 few_shot_aux[f"query_{name}_logits"],
                 few_shot_aux[f"query_{name}_valid"], labels,
@@ -376,46 +282,8 @@ def compute_query_partial_q2s_loss(
         if isinstance(few_shot_aux, dict) and "query_verifier_transport_strength" in few_shot_aux:
             diagnostics["q2s_verifier_transport_strength"] = few_shot_aux["query_verifier_transport_strength"].detach()
 
-    evidence_mil = None
-    if evidence_mil_weight > 0.0:
-        if not isinstance(few_shot_aux, dict):
-            raise ValueError(
-                "EVIDENCE_MIL_LOSS_WEIGHT > 0 requires few_shot_aux."
-            )
-        frame_margins = few_shot_aux.get("query_frame_relative_margin")
-        frame_valid = few_shot_aux.get("query_frame_valid")
-        if not isinstance(frame_margins, torch.Tensor) or not isinstance(
-            frame_valid, torch.Tensor
-        ):
-            raise ValueError(
-                "Evidence-MIL requires query_frame_relative_margin and "
-                "query_frame_valid Tensors."
-            )
-        evidence_mil = compute_evidence_mil_loss(
-            frame_margins,
-            frame_valid,
-            labels,
-            topk_frames=int(
-                getattr(match_cfg, "EVIDENCE_VIDEO_TOPK_FRAMES", 3)
-            ),
-            temperature=float(
-                getattr(match_cfg, "EVIDENCE_MIL_TEMPERATURE", 0.10)
-            ),
-        )
-        diagnostics.update({
-            "q2s_evidence_mil_loss": evidence_mil["loss"].detach(),
-            "q2s_evidence_mil_weighted_loss": (
-                evidence_mil_weight * evidence_mil["loss"]
-            ).detach(),
-            "q2s_evidence_mil_valid_fraction": (
-                evidence_mil["valid"].float().mean().detach()
-            ),
-        })
-
     if not dual_enabled:
         loss = verified_loss + learned_aux_loss
-        if evidence_mil is not None:
-            loss = loss + evidence_mil_weight * evidence_mil["loss"]
         return loss, verified_scaled, diagnostics
 
     if not isinstance(few_shot_aux, dict):
@@ -453,29 +321,11 @@ def compute_query_partial_q2s_loss(
     base_scaled = _sanitize(base_logits)
     base_loss = supervised_bce(base_scaled)
     loss = base_weight * base_loss + verified_weight * verified_loss + learned_aux_loss
-    if evidence_mil is not None:
-        loss = loss + evidence_mil_weight * evidence_mil["loss"]
     diagnostics.update({
         "q2s_base_loss": base_loss.detach(),
         "q2s_verified_loss": verified_loss.detach(),
     })
     return loss, verified_scaled, diagnostics
-
-
-def get_text_align_loss(few_shot_aux, ref_tensor):
-    """Return the text alignment loss scalar or a zero scalar on the right device."""
-    if isinstance(few_shot_aux, dict) and "text_align_loss" in few_shot_aux:
-        align_loss = few_shot_aux["text_align_loss"]
-        if not isinstance(align_loss, torch.Tensor):
-            align_loss = ref_tensor.new_tensor(float(align_loss))
-        return torch.nan_to_num(align_loss, nan=0.0, posinf=1e4, neginf=0.0)
-    return ref_tensor.new_zeros(())
-
-
-
-
-
-
 
 
 def get_query_matchability_metrics(few_shot_aux, q2s_labels):
@@ -509,8 +359,7 @@ def get_query_matchability_metrics(few_shot_aux, q2s_labels):
             f"{tuple(labels.shape)} versus {tuple(matchability.shape)}."
         )
 
-    if few_shot_aux.get("query_verifier_backend") == "learned_dual_verifier":
-        # Never label unbounded learned logits as the old cosine margins.
+    if few_shot_aux.get("query_evidence_enabled", False):
         metrics = {}
         pairs = {
             "verifier_quality": "query_quality_mass_mean",
@@ -551,168 +400,45 @@ def get_query_matchability_metrics(few_shot_aux, q2s_labels):
                 metrics["verifier_" + name] = value.float()
         return {name: value.detach() for name, value in metrics.items()}
 
-    def _pair_tensor(key, default=None):
-        value = few_shot_aux.get(key, default)
-        if value is None:
-            return None
-        if not isinstance(value, torch.Tensor) or tuple(value.shape) != tuple(
-            matchability.shape
-        ):
-            raise ValueError(
-                f"{key} must match [Q,K]; got "
-                f"{tuple(value.shape) if isinstance(value, torch.Tensor) else type(value).__name__}."
-            )
-        return torch.nan_to_num(
-            value.to(device=matchability.device).float(),
-            nan=0.0,
-            posinf=1.0,
-            neginf=-1.0,
-        )
+    return {}
 
-    positive_similarity = _pair_tensor(
-        "query_class_positive_similarity",
-        few_shot_aux.get(
-            "query_partial_diag_similarity",
-            torch.zeros_like(matchability),
-        ),
-    )
-    negative_similarity = _pair_tensor(
-        "query_class_hardest_confuser_similarity",
-        torch.zeros_like(matchability),
-    )
-    relative_margin = _pair_tensor(
-        "query_class_relative_margin",
-        few_shot_aux.get("query_class_evidence", torch.zeros_like(matchability)),
-    )
 
-    positive_mask = labels > 0.5
-    negative_mask = ~positive_mask
-
-    def masked_mean(value, mask):
-        selected = value[mask]
-        if selected.numel() == 0:
-            return value.new_zeros(())
-        return selected.mean()
-
-    metrics = {
-        "matchability_positive_similarity": masked_mean(
-            positive_similarity,
-            positive_mask,
-        ),
-        "matchability_negative_similarity": masked_mean(
-            positive_similarity,
-            negative_mask,
-        ),
-        "matchability_positive_confuser_similarity": masked_mean(
-            negative_similarity,
-            positive_mask,
-        ),
-        "matchability_negative_confuser_similarity": masked_mean(
-            negative_similarity,
-            negative_mask,
-        ),
-        "matchability_positive_margin": masked_mean(
-            relative_margin,
-            positive_mask,
-        ),
-        "matchability_negative_margin": masked_mean(
-            relative_margin,
-            negative_mask,
-        ),
-        "matchability_positive_rho": masked_mean(
-            matchability.float(),
-            positive_mask,
-        ),
-        "matchability_negative_rho": masked_mean(
-            matchability.float(),
-            negative_mask,
-        ),
+def get_query_evidence_csv_fields(few_shot_aux, labels):
+    """Return available per-Query/class diagnostics with the CSV column names."""
+    if not isinstance(few_shot_aux, dict):
+        return {}
+    fields = {
+        "query_class_base_score": "query_partial_q2s_base_logits",
+        "query_class_temporal_score": "query_partial_q2s_temporal_logits",
+        "query_class_matchability": "query_class_matchability",
+        "query_quality_mass": "query_quality_mass_mean",
+        "query_quality_logit": "query_quality_logit_mean",
+        "query_quality_anchor": "query_quality_anchor_mean",
+        "query_quality_correction": "query_quality_correction_mean",
+        "query_quality_correction_abs": "query_quality_correction_abs_mean",
+        "query_quality_correction_saturation": "query_quality_correction_saturation_mean",
+        "query_relation_logit": "query_relation_logit_mean",
+        "query_target_mass": "query_frame_target_mass_mean",
+        "query_confuser_mass": "query_frame_confuser_mass_mean",
+        "query_null_mass": "query_frame_null_mass_mean",
+        "query_frame_matchability": "query_frame_matchability_mean",
+        "query_evidence_effective_patches": "query_evidence_effective_patches_mean",
+        "query_evidence_top1_mass": "query_evidence_top1_mass_mean",
+        "query_frame_temporal_logit_delta": "query_frame_temporal_logit_delta",
+        "query_frame_max_t_switch_fraction": "query_frame_max_t_switch_fraction",
+        "query_frame_patch_mass": "query_frame_patch_mass_mean",
+        "query_frame_unmatched_mass": "query_frame_unmatched_mass_mean",
+        "query_frame_transport_logit_delta": "query_frame_transport_logit_delta",
     }
-    local_positive = _pair_tensor("query_local_positive_similarity_mean")
-    local_confuser = _pair_tensor("query_local_confuser_similarity_mean")
-    local_margin = _pair_tensor("query_local_relative_margin_mean")
-    local_weight_shift = _pair_tensor("query_local_weight_shift_mean")
-    if local_positive is not None:
-        metrics.update({
-            "local_positive_similarity_positive": masked_mean(
-                local_positive,
-                positive_mask,
-            ),
-            "local_positive_similarity_negative": masked_mean(
-                local_positive,
-                negative_mask,
-            ),
-        })
-    if local_confuser is not None:
-        metrics.update({
-            "local_confuser_similarity_positive": masked_mean(
-                local_confuser,
-                positive_mask,
-            ),
-            "local_confuser_similarity_negative": masked_mean(
-                local_confuser,
-                negative_mask,
-            ),
-        })
-    if local_margin is not None:
-        metrics.update({
-            "local_margin_positive": masked_mean(local_margin, positive_mask),
-            "local_margin_negative": masked_mean(local_margin, negative_mask),
-        })
-    if local_weight_shift is not None:
-        metrics["local_weight_shift_mean"] = local_weight_shift.mean()
-    frame_pairs = {
-        "frame_positive_evidence": _pair_tensor(
-            "query_frame_positive_evidence_mean"
-        ),
-        "frame_confuser_evidence": _pair_tensor(
-            "query_frame_confuser_evidence_mean"
-        ),
-        "frame_margin": _pair_tensor("query_frame_relative_margin_mean"),
-        "frame_rho": _pair_tensor("query_frame_matchability_mean"),
-        "frame_temporal_delta": _pair_tensor(
-            "query_frame_temporal_logit_delta"
-        ),
-        "frame_max_t_switch": _pair_tensor(
-            "query_frame_max_t_switch_fraction"
-        ),
-        "evidence_effective_patches": _pair_tensor(
-            "query_evidence_effective_patches_mean"
-        ),
-        "evidence_top1_mass": _pair_tensor(
-            "query_evidence_top1_mass_mean"
-        ),
-        "absolute_evidence": _pair_tensor(
-            "query_frame_absolute_evidence_mean"
-        ),
-        "transport_patch_mass": _pair_tensor(
-            "query_frame_patch_mass_mean"
-        ),
-        "transport_unmatched_mass": _pair_tensor(
-            "query_frame_unmatched_mass_mean"
-        ),
-        "transport_logit_delta": _pair_tensor(
-            "query_frame_transport_logit_delta"
-        ),
-    }
-    for name, value in frame_pairs.items():
+    result = {}
+    for name, key in fields.items():
+        value = few_shot_aux.get(key)
         if value is None:
             continue
-        metrics[f"{name}_positive"] = masked_mean(value, positive_mask)
-        metrics[f"{name}_negative"] = masked_mean(value, negative_mask)
-    valid_count = few_shot_aux.get("query_class_confuser_valid_count")
-    if isinstance(valid_count, torch.Tensor):
-        metrics["matchability_confuser_valid_count"] = (
-            torch.nan_to_num(valid_count.float(), nan=0.0).mean()
-        )
-    absolute_reliable = few_shot_aux.get(
-        "support_absolute_calibration_reliable"
-    )
-    if isinstance(absolute_reliable, torch.Tensor):
-        metrics["transport_support_reliable_fraction"] = (
-            absolute_reliable.float().mean()
-        )
-    return {key: value.detach() for key, value in metrics.items()}
+        if not isinstance(value, torch.Tensor) or value.shape != labels.shape:
+            raise ValueError(f"{key} must align with Query/class labels {tuple(labels.shape)}.")
+        result[name] = value.detach().float().cpu().numpy()
+    return result
 
 
 def multilabel_top1_accuracy(logits, labels):

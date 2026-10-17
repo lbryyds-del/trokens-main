@@ -19,6 +19,10 @@ This repository contains the official code for the paper "Trokens: Semantic-Awar
 
 </div>
 
+## SAV 默认入口
+
+SAV 使用 `configs/trokens/sav.yaml`。模型与配置见[默认模型说明](docs/model.md)，删除内容及验证见[仓库清理记录](docs/repository_cleanup.md)。
+
 ## Installation
 
 1. Create a environment using either conda or venv:

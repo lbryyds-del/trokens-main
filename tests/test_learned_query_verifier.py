@@ -25,8 +25,7 @@ def _cfg():
     return cfg
 
 
-def _model(quality=True, uniqueness=True, temporal=False, checkpoint=False, mode="metric",
-           quality_mode="semantic_attention"):
+def _model(quality=True, uniqueness=True, checkpoint=False):
     model = Pointformer.__new__(Pointformer)
     nn.Module.__init__(model)
     model.cfg = _cfg()
@@ -34,21 +33,16 @@ def _model(quality=True, uniqueness=True, temporal=False, checkpoint=False, mode
     cfg.QUALITY_ENABLE = quality
     cfg.UNIQUENESS_ENABLE = uniqueness
     vc = cfg.LEARNED_VERIFIER
-    vc.UNIQUENESS_MODE = mode
-    vc.QUALITY_MODE = quality_mode
     vc.QUALITY_HIDDEN_DIM = 8
-    vc.HIDDEN_DIM, vc.NUM_HEADS, vc.FFN_DIM = 8, 2, 16
     vc.QUERY_CHUNK_SIZE = 1
     vc.ACTIVATION_CHECKPOINT = checkpoint
     model.embed_dim = 4
     model.pot_route_cfg = model.cfg.FEW_SHOT.POT_ROUTE
     model.pot_route_cfg.FRAME_SOFTMAX_TAU = 0.4
-    model.pot_route_cfg.TEMPORAL_REFINEMENT.ENABLE = temporal
     model.use_frame_softmax_route = model.use_query_partial_q2s = True
     model.use_support_text_fusion = True
     model.support_text_fusion_cfg = model.cfg.FEW_SHOT.SUPPORT_TEXT_FUSION
     model._get_pot_label_text_features = lambda ids, dtype: torch.eye(4, device=ids.device, dtype=dtype)[:2]
-    model._init_temporal_similarity_refinement()
     model._init_query_evidence_verifier()
     return model
 
@@ -77,21 +71,12 @@ def _run(model, post, raw, meta):
 
 @pytest.mark.parametrize("quality", [False, True])
 @pytest.mark.parametrize("uniqueness", [False, True])
-@pytest.mark.parametrize("temporal", [False, True])
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_switches_preserve_route_and_bypass_all_old_scores(quality, uniqueness, temporal, quality_mode, monkeypatch):
-    import trokens.models.query_class_matchability as old
-    def forbidden(*args, **kwargs):
-        pytest.fail("The learned backend executed an old judgment chain")
-    for name in ("compute_support_calibrated_frame_transport_mass", "compute_local_positive_confuser_margin",
-                 "compute_evidence_conditioned_frame_matchability", "compute_matchability_from_similarity",
-                 "_compute_relative_matchability_with_diagnostics", "build_class_confuser_prototypes"):
-        monkeypatch.setattr(old, name, forbidden)
-    model = _model(quality, uniqueness, temporal, quality_mode=quality_mode)
+def test_switches_preserve_route_and_independent_head_gradients(quality, uniqueness, monkeypatch):
+    model = _model(quality, uniqueness)
     post, raw, meta = _episode()
     post.requires_grad_()
     out = _run(model, post, raw if quality else None, meta)
-    base_model = _model(False, False, temporal)
+    base_model = _model(False, False)
     base = _run(base_model, post, None, meta)
     torch.testing.assert_close(out["query_partial_query_prototypes"], base["query_partial_query_prototypes"], rtol=0, atol=0)
     torch.testing.assert_close(out["query_partial_q2s_base_logits"], base["query_partial_q2s_base_logits"], rtol=0, atol=0)
@@ -122,9 +107,8 @@ def test_switches_preserve_route_and_bypass_all_old_scores(quality, uniqueness, 
     assert not any("margin" in name for name in reported)
 
 
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_query_labels_ignored_and_support_order_invariant(quality_mode):
-    model = _model(quality_mode=quality_mode).eval()
+def test_query_labels_ignored_and_support_order_invariant():
+    model = _model().eval()
     post, raw, meta = _episode()
     first = _run(model, post, raw, meta)
     changed = dict(meta)
@@ -139,22 +123,8 @@ def test_query_labels_ignored_and_support_order_invariant(quality_mode):
         torch.testing.assert_close(first[key], third[key], atol=2e-6, rtol=2e-6)
 
 
-@pytest.mark.parametrize("temporal", [False, True])
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_legacy_and_learned_backends_have_identical_base_route(temporal, quality_mode):
-    model = _model(temporal=temporal, quality_mode=quality_mode).eval()
-    post, raw, meta = _episode()
-    learned = _run(model, post, raw, meta)
-    model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BACKEND = "legacy"
-    legacy = _run(model, post, raw, meta)
-    for key in ("query_partial_query_prototypes", "query_partial_support_prototypes",
-                "query_partial_q2s_base_logits", "query_patch_conditional_weights"):
-        torch.testing.assert_close(learned[key], legacy[key], rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_heads_share_parameters_across_episode_classes(quality_mode):
-    verifier = _model(quality_mode=quality_mode).query_evidence_verifier.eval()
+def test_heads_share_parameters_across_episode_classes():
+    verifier = _model().query_evidence_verifier.eval()
     inputs = _direct_inputs()
     first = verifier(**inputs)
     order = torch.tensor([1, 0])
@@ -169,9 +139,8 @@ def test_heads_share_parameters_across_episode_classes(quality_mode):
         torch.testing.assert_close(first[key][:, order], second[key], rtol=2e-6, atol=2e-7)
 
 
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_missing_references_invalid_frames_and_unknown_support_are_safe(quality_mode):
-    model = _model(quality_mode=quality_mode)
+def test_missing_references_invalid_frames_and_unknown_support_are_safe():
+    model = _model()
     post, raw, meta = _episode()
     meta["episode_positive_labels"][:2] = True  # no negative Support
     out = _run(model, post, raw, meta)
@@ -215,9 +184,8 @@ def _direct_inputs(device="cpu"):
     )
 
 
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_shared_relation_swap_symmetry_and_detached_inputs(quality_mode):
-    verifier = _model(quality_mode=quality_mode).query_evidence_verifier
+def test_shared_relation_swap_symmetry_and_detached_inputs():
+    verifier = _model().query_evidence_verifier
     inputs = _direct_inputs()
     first = verifier(**inputs)
     swapped = dict(inputs, support_labels=~inputs["support_labels"])
@@ -237,9 +205,8 @@ def test_shared_relation_swap_symmetry_and_detached_inputs(quality_mode):
 
 
 @pytest.mark.parametrize("use_checkpoint", [False, True])
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_chunking_checkpoint_and_autocast_finite_gradients(use_checkpoint, quality_mode):
-    verifier = _model(checkpoint=use_checkpoint, quality_mode=quality_mode).query_evidence_verifier
+def test_chunking_checkpoint_and_autocast_finite_gradients(use_checkpoint):
+    verifier = _model(checkpoint=use_checkpoint).query_evidence_verifier
     inputs = _direct_inputs()
     inputs["query_valid"][0, 1] = False
     inputs["support_raw_valid"][0, 0] = False
@@ -281,40 +248,23 @@ def test_warmup_is_training_only_and_resumable():
     assert _run(model.eval(), post, raw, meta)["query_verifier_transport_strength"].item() == 1.0
 
 
-def test_config_legacy_subflags_do_not_disable_new_heads_and_tinyvirat_unchanged():
+def test_independent_switches_and_tinyvirat_uses_current_verifier():
     cfg = _cfg()
     match = cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY
-    match.ABSOLUTE_MASS_ENABLE = match.EVIDENCE_VERIFICATION_ENABLE = False
-    judgments = resolve_query_judgments(match)
-    assert judgments.quality and judgments.frame_verification
+    assert resolve_query_judgments(match).quality
+    assert resolve_query_judgments(match).uniqueness
+    match.QUALITY_ENABLE = False
+    assert not resolve_query_judgments(match).quality
+    assert resolve_query_judgments(match).uniqueness
     tiny = get_cfg()
     tiny.merge_from_file(str(Path(__file__).resolve().parents[1] / "configs/trokens/tinyvirat.yaml"))
-    assert tiny.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BACKEND == "legacy"
+    assert tiny.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE
+    vc = tiny.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER
+    assert "QUALITY_MODE" not in vc and "UNIQUENESS_MODE" not in vc
 
 
-def test_legacy_scoring_options_have_no_effect_on_new_predictions_or_loss():
-    model = _model().eval()
-    post, raw, meta = _episode()
-    first = _run(model, post, raw, meta)
-    labels = meta["episode_positive_labels"][2:].float()
-    first_loss, _, _ = compute_query_partial_q2s_loss(first["query_partial_q2s_logits"], labels, first, model.cfg)
-    cfg = model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY
-    cfg.MODE = "unused"
-    cfg.EVIDENCE_SOURCE = cfg.ABSOLUTE_MASS_SOURCE = "unused"
-    cfg.ABSOLUTE_MASS_ENABLE = cfg.EVIDENCE_VERIFICATION_ENABLE = False
-    cfg.ABSOLUTE_MASS_PATCH_TOPK = cfg.LOCAL_POSITIVE_TOPK = 999
-    cfg.ABSOLUTE_MASS_TEMPERATURE = cfg.FRAME_MARGIN_TEMPERATURE = -10.0
-    cfg.EVIDENCE_MIL_LOSS_WEIGHT = -1.0
-    second = _run(model, post, raw, meta)
-    second_loss, _, _ = compute_query_partial_q2s_loss(second["query_partial_q2s_logits"], labels, second, model.cfg)
-    for key in ("query_quality_logits", "query_relation_logits", "query_partial_q2s_logits"):
-        torch.testing.assert_close(first[key], second[key], rtol=0, atol=0)
-    torch.testing.assert_close(first_loss, second_loss, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_verified_loss_trains_heads_and_matcher_without_raw_feedback(quality_mode):
-    model = _model(quality_mode=quality_mode)
+def test_verified_loss_trains_heads_and_matcher_without_raw_feedback():
+    model = _model()
     post, raw, meta = _episode()
     post.requires_grad_()
     raw.requires_grad_()
@@ -325,8 +275,7 @@ def test_verified_loss_trains_heads_and_matcher_without_raw_feedback(quality_mod
     assert raw.grad is None
     assert post.grad is not None and post.grad.abs().sum() > 0
     verifier = model.query_evidence_verifier
-    quality_weight = (verifier.semantic_quality.relation[-1].weight if quality_mode == "semantic_relation"
-                      else verifier.quality_head.weight)
+    quality_weight = verifier.semantic_quality.relation[-1].weight
     for parameter in (quality_weight, verifier.metric_temperature_raw, verifier.metric_scale_raw):
         assert parameter.grad is not None and torch.isfinite(parameter.grad).all()
         assert parameter.grad.abs().sum() > 0
@@ -340,10 +289,7 @@ def test_forward_extracts_raw_before_position_and_motion_only_when_needed(qualit
     meta["hod_feat"] = torch.zeros_like(raw)
     model.feat_extractor_type = "dinotxt_vitl14_reg4"
     model.cfg.POINT_INFO.ENABLE = True
-    model.cfg.POINT_INFO.USE_CORRELATION = False
     model.cfg.MF.USE_BASE_POS_EMBED = True
-    model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_SOURCE = "raw"
-    model.use_text_alignment = False
     model.head_drop = model.head = nn.Identity()
     model.get_dinotxt_features = lambda video: raw.unsqueeze(2)
     sampled = []
@@ -373,11 +319,10 @@ def test_forward_extracts_raw_before_position_and_motion_only_when_needed(qualit
     assert torch.isfinite(aux["query_partial_q2s_logits"]).all()
 
 
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_checkpoint_guard_roundtrip_and_optimizer_group(tmp_path, quality_mode):
+def test_checkpoint_guard_roundtrip_and_optimizer_group(tmp_path):
     from trokens.models.optimizer import construct_optimizer
     from trokens.utils.checkpoint import load_checkpoint, validate_verifier_checkpoint
-    model = _model(quality_mode=quality_mode)
+    model = _model()
     opt = construct_optimizer(model, model.cfg)
     grouped = {id(p): group["weight_decay"] for group in opt.param_groups for p in group["params"]}
     for name, p in model.query_evidence_verifier.named_parameters():
@@ -392,7 +337,7 @@ def test_checkpoint_guard_roundtrip_and_optimizer_group(tmp_path, quality_mode):
         validate_verifier_checkpoint(model, partial, allow_init=True)
     path = tmp_path / "new.pyth"
     torch.save({"model_state": state, "epoch": 4, "optimizer_state": opt.state_dict()}, path)
-    restored = _model(quality_mode=quality_mode)
+    restored = _model()
     assert load_checkpoint(str(path), restored, data_parallel=False) == 4
     for key in state:
         assert torch.equal(state[key], restored.state_dict()[key])
@@ -403,7 +348,7 @@ def test_checkpoint_guard_roundtrip_and_optimizer_group(tmp_path, quality_mode):
     assert load_checkpoint(str(old), restored, data_parallel=False, optimizer=opt,
                            allow_verifier_init=True) == -1
     incompatible = dict(state)
-    projection = "semantic_quality.projection" if quality_mode == "semantic_relation" else "raw_projection"
+    projection = "semantic_quality.projection"
     incompatible[f"query_evidence_verifier.{projection}.weight"] = torch.zeros(7, 4)
     bad = tmp_path / "incompatible.pyth"
     torch.save({"model_state": incompatible, "epoch": 4}, bad)
@@ -418,12 +363,12 @@ def test_real_registration_preserves_backbone_rng_and_weights(monkeypatch):
     monkeypatch.setattr(Pointformer, "_load_dinotxt_text_model", lambda self: nn.Identity())
     monkeypatch.setattr(Pointformer, "_load_dinotxt_tokenizer", lambda self: None)
     cfg = _cfg()
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BACKEND = "legacy"
+    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE = False
     torch.manual_seed(59)
     baseline = Pointformer(cfg)
     state, rng = baseline.state_dict(), torch.random.get_rng_state()
     cfg = cfg.clone()
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BACKEND = "learned_dual_verifier"
+    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE = True
     torch.manual_seed(59)
     learned = Pointformer(cfg)
     assert torch.equal(rng, torch.random.get_rng_state())
@@ -434,9 +379,8 @@ def test_real_registration_preserves_backbone_rng_and_weights(monkeypatch):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("checkpoint", [False, True])
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_cuda_amp_partial_frames_backward(checkpoint, quality_mode):
-    model = _model(checkpoint=checkpoint, quality_mode=quality_mode).cuda()
+def test_cuda_amp_partial_frames_backward(checkpoint):
+    model = _model(checkpoint=checkpoint).cuda()
     model.query_evidence_verifier.chunk_size = 16
     post, raw, meta = _episode("cuda")
     post.requires_grad_()
@@ -458,7 +402,7 @@ def test_cuda_amp_partial_frames_backward(checkpoint, quality_mode):
         assert p.grad is not None and torch.isfinite(p.grad).all(), name
 
 
-def _ddp_worker(rank, rendezvous, mode, quality_mode):
+def _ddp_worker(rank, rendezvous):
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel
     torch.set_num_threads(1)
@@ -467,7 +411,7 @@ def _ddp_worker(rank, rendezvous, mode, quality_mode):
     try:
         # Match production DDP + activation checkpoint settings. One worker
         # sometimes has no valid supervision, but all heads must stay connected.
-        verifier = DistributedDataParallel(_model(checkpoint=True, mode=mode, quality_mode=quality_mode).query_evidence_verifier,
+        verifier = DistributedDataParallel(_model(checkpoint=True).query_evidence_verifier,
                                            find_unused_parameters=True)
         optimizer = torch.optim.SGD(verifier.parameters(), lr=0.01)
         for step in range(3):
@@ -494,8 +438,6 @@ def _ddp_worker(rank, rendezvous, mode, quality_mode):
 
 
 @pytest.mark.skipif(not torch.distributed.is_gloo_available(), reason="Gloo required")
-@pytest.mark.parametrize("mode", ["relation_attention", "metric"])
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_two_rank_ddp_checkpointing_with_missing_references(tmp_path, mode, quality_mode):
-    torch.multiprocessing.spawn(_ddp_worker, args=((tmp_path / "rendezvous").as_uri(), mode, quality_mode),
+def test_two_rank_ddp_checkpointing_with_missing_references(tmp_path):
+    torch.multiprocessing.spawn(_ddp_worker, args=((tmp_path / "rendezvous").as_uri(),),
                                 nprocs=2, join=True)

@@ -12,14 +12,14 @@ from trokens.utils.checkpoint import load_checkpoint, validate_verifier_checkpoi
 
 def _verifier():
     torch.manual_seed(129)
-    return _model(quality_mode="semantic_relation").query_evidence_verifier
+    return _model().query_evidence_verifier
 
 
 def test_config_and_no_old_quality_classifier_or_class_specific_parameters():
     cfg = _cfg()
     vc = cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER
-    assert vc.QUALITY_MODE == "semantic_relation" and vc.UNIQUENESS_MODE == "metric"
-    assert cfg.OUTPUT_DIR == "output/sav_semantic_relation_v3"
+    assert "QUALITY_MODE" not in vc and "UNIQUENESS_MODE" not in vc
+    assert cfg.OUTPUT_DIR == "output/sav"
     assert not cfg.TRAIN.AUTO_RESUME and cfg.TRAIN.CHECKPOINT_FILE_PATH == ""
     verifier = _verifier()
     assert verifier.architecture_version.item() == 3
@@ -141,15 +141,18 @@ def test_no_post_or_route_shortcut_and_invalid_support_values_do_not_affect_qual
     assert not torch.allclose(first["quality_logits"], verifier(**changed)["quality_logits"])
 
 
-def test_only_quality_changes_rho_and_all_base_route_outputs_are_identical():
-    old = _model().eval()
-    new = _model(quality_mode="semantic_relation").eval()
-    before, after = (_run(model, *_episode()) for model in (old, new))
-    for key in ("query_relation_logits", "query_frame_matchability", "query_partial_query_prototypes",
+def test_quality_ablation_preserves_rho_and_all_base_route_outputs():
+    torch.manual_seed(321)
+    enabled = _model(quality=True).eval()
+    torch.manual_seed(321)
+    disabled = _model(quality=False).eval()
+    post, raw, meta = _episode()
+    first, second = _run(enabled, post, raw, meta), _run(disabled, post, raw, meta)
+    for key in ("query_relation_logits", "query_partial_query_prototypes",
                 "query_partial_support_prototypes", "query_partial_q2s_base_logits",
-                "query_patch_conditional_weights", "query_evidence_patch_weights"):
-        torch.testing.assert_close(before[key], after[key], atol=0, rtol=0, msg=key)
-    assert not torch.allclose(before["query_quality_logits"], after["query_quality_logits"])
+                "query_patch_conditional_weights"):
+        torch.testing.assert_close(first[key], second[key], atol=0, rtol=0, msg=key)
+    assert "query_quality_logits" not in second
 
 
 def test_every_quality_parameter_learns_from_video_mil_not_hand_score_targets():
@@ -169,7 +172,7 @@ def test_every_quality_parameter_learns_from_video_mil_not_hand_score_targets():
 
 
 def test_new_diagnostics_are_exported_with_positive_negative_split_and_detached():
-    model = _model(quality_mode="semantic_relation")
+    model = _model()
     post, raw, meta = _episode()
     output = _run(model, post, raw, meta)
     metrics = get_query_matchability_metrics(output, meta["episode_positive_labels"][2:].float())
@@ -181,23 +184,22 @@ def test_new_diagnostics_are_exported_with_positive_negative_split_and_detached(
     assert metrics["verifier_quality_max_evidence_delta"].item() == pytest.approx(.10)
 
 
-@pytest.mark.parametrize("old_mode", ["relation_attention", "metric"])
-@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("old_version", [1, 2, 4])
 @pytest.mark.parametrize("allow_init", [False, True])
-def test_v3_cannot_silently_load_or_resume_v1_v2(tmp_path, old_mode, reverse, allow_init):
-    old, new = _model(mode=old_mode), _model(quality_mode="semantic_relation")
-    source, target = (new, old) if reverse else (old, new)
-    state = source.state_dict()
-    with pytest.raises(ValueError, match="QUALITY_MODE"):
+def test_incompatible_evidence_checkpoint_is_rejected(tmp_path, old_version, allow_init):
+    target = _model()
+    state = {k: v.clone() for k, v in target.state_dict().items()}
+    state["query_evidence_verifier.architecture_version"] = torch.tensor(old_version)
+    with pytest.raises(ValueError, match="architecture"):
         validate_verifier_checkpoint(target, state, allow_init=allow_init)
     path = tmp_path / "checkpoint.pyth"
     torch.save(dict(model_state=state, epoch=19), path)
-    with pytest.raises(ValueError, match="QUALITY_MODE"):
+    with pytest.raises(ValueError, match="architecture"):
         load_checkpoint(str(path), target, data_parallel=False, allow_verifier_init=allow_init)
 
 
 @pytest.mark.parametrize("field,value", [
-    ("QUALITY_MODE", "typo"), ("QUALITY_HIDDEN_DIM", 0), ("QUALITY_PATCH_TEMPERATURE", 0.),
+    ("QUALITY_HIDDEN_DIM", 0), ("QUALITY_PATCH_TEMPERATURE", 0.),
     ("QUALITY_REFERENCE_TEMPERATURE", float("nan")), ("QUALITY_MAX_POOL_DELTA", -1.),
     ("QUALITY_MAX_REFERENCE_DELTA", float("inf")), ("QUALITY_MAX_EVIDENCE_DELTA", -.1),
     ("QUALITY_SCALE_INIT", 0.), ("QUALITY_BIAS_INIT", float("nan")), ("QUALITY_RELATION_STRENGTH", 2.),

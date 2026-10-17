@@ -334,7 +334,7 @@ def inflate_weight(state_dict_2d, state_dict_3d):
 def validate_verifier_checkpoint(model, state_dict, allow_init=False):
     """Reject random/partial learned heads at evaluation or resume.
 
-    An explicit training initialization from a legacy checkpoint may omit the
+    An explicit training initialization from a backbone checkpoint may omit the
     entire verifier. That requires resetting epoch and optimizer, not resuming.
     """
     verifier = getattr(model, "query_evidence_verifier", None)
@@ -346,22 +346,19 @@ def validate_verifier_checkpoint(model, state_dict, allow_init=False):
         version = state_dict[version_key]
         if version.numel() != 1 or version.item() != verifier.architecture_version.item():
             raise ValueError(
-                "Unsupported learned verifier checkpoint version for the configured QUALITY_MODE / UNIQUENESS_MODE. "
-                "Use semantic_attention quality with relation_attention rho for v1 or metric rho for v2; "
-                "semantic_relation quality with metric rho is v3 (relation_attention rho is v4). Changing a head requires "
-                "a new training run, not automatic resume or evaluation with an untrained head."
+                "Checkpoint evidence architecture does not match the configured quality/uniqueness heads. "
+                "Changing heads requires a new training run; incompatible weights cannot be resumed or evaluated."
             )
     expected = {prefix + name: value for name, value in verifier.state_dict().items()}
     missing = [name for name, value in expected.items()
                if name not in state_dict or state_dict[name].shape != value.shape]
     if missing:
         if allow_init and not any(name.startswith(prefix) for name in state_dict):
-            logger.warning("Legacy checkpoint has no learned verifier: initializing BOTH requested heads; resetting epoch/optimizer.")
+            logger.warning("Checkpoint has no Query evidence weights: initializing requested heads; resetting epoch/optimizer.")
             model._verifier_checkpoint_loaded = False
             return True
         raise ValueError(
-            "Checkpoint lacks complete learned verifier weights. Train the new heads first "
-            "or use BACKEND=legacy for the old model. Missing/mismatched: " + ", ".join(missing[:6])
+            "Checkpoint lacks complete Query evidence weights. Train the heads first. Missing/mismatched: " + ", ".join(missing[:6])
         )
     model._verifier_checkpoint_loaded = True
     return False

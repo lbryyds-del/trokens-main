@@ -75,13 +75,6 @@ class FewShotEpisodeSampler(Sampler):
             dtype=np.float32,
         )
 
-    def _sample_indices_for_class(self, class_label, num_samples, used_indices, rng):
-        candidates = list(self.class_indices[class_label])
-        fresh_candidates = [idx for idx in candidates if idx not in used_indices]
-        pool = fresh_candidates if len(fresh_candidates) >= num_samples else candidates
-        if len(pool) >= num_samples:
-            return rng.sample(pool, num_samples)
-        return [rng.choice(pool) for _ in range(num_samples)]
 
     def _sample_indices_for_label_combo(
         self, class_label, num_samples, used_indices, rng

@@ -5,33 +5,29 @@ import torch
 
 from test_learned_query_verifier import _direct_inputs, _model, _cfg
 from tools.few_shot_multilabel import compute_learned_evidence_mil_loss
-from trokens.models.query_evidence_verifier import FP32LayerNorm, ReferenceAttention
+from trokens.models.query_evidence_verifier import FP32LayerNorm
 
 
 def test_sav_fast_defaults_and_conservative_global_defaults():
     from trokens.config.defaults import get_cfg
     cfg = _cfg().FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER
     assert (cfg.QUERY_CHUNK_SIZE, cfg.ACTIVATION_CHECKPOINT, cfg.AMP_ENABLE) == (16, False, True)
-    assert cfg.UNIQUENESS_MODE == "metric"
-    assert cfg.QUALITY_MODE == "semantic_relation"
+    assert "QUALITY_MODE" not in cfg and "UNIQUENESS_MODE" not in cfg
     defaults = get_cfg().FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER
     assert (defaults.QUERY_CHUNK_SIZE, defaults.ACTIVATION_CHECKPOINT, defaults.AMP_ENABLE) == (4, True, False)
-    assert defaults.UNIQUENESS_MODE == "relation_attention"
-    assert defaults.QUALITY_MODE == "semantic_attention"
+    assert "QUALITY_MODE" not in defaults and "UNIQUENESS_MODE" not in defaults
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("checkpoint", [False, True])
 @pytest.mark.parametrize("detach", [False, True])
 @pytest.mark.parametrize("mask_case", ["partial", "empty", "no_confuser"])
-@pytest.mark.parametrize("mode", ["relation_attention", "metric"])
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_amp_outputs_masks_gradients_and_grad_scaler(checkpoint, detach, mask_case, mode, quality_mode):
+def test_amp_outputs_masks_gradients_and_grad_scaler(checkpoint, detach, mask_case):
     torch.manual_seed(228)
-    baseline = _model(checkpoint=True, mode=mode, quality_mode=quality_mode).cuda().query_evidence_verifier
+    baseline = _model(checkpoint=True).cuda().query_evidence_verifier
     baseline.amp_enabled = False
     baseline.chunk_size = 4
-    actual = _model(checkpoint=checkpoint, mode=mode, quality_mode=quality_mode).cuda().query_evidence_verifier
+    actual = _model(checkpoint=checkpoint).cuda().query_evidence_verifier
     actual.amp_enabled = True
     actual.chunk_size = 16
     baseline.detach_inputs = actual.detach_inputs = detach
@@ -95,14 +91,12 @@ def test_amp_outputs_masks_gradients_and_grad_scaler(checkpoint, detach, mask_ca
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("amp,outer_amp", [(True, True), (False, True), (True, False)])
-@pytest.mark.parametrize("mode", ["relation_attention", "metric"])
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_amp_linear_attention_and_fp32_normalization_boundaries(amp, outer_amp, mode, quality_mode):
-    verifier = _model(mode=mode, quality_mode=quality_mode).cuda().query_evidence_verifier
+def test_amp_linear_attention_and_fp32_normalization_boundaries(amp, outer_amp):
+    verifier = _model().cuda().query_evidence_verifier
     verifier.amp_enabled = amp
     observed, hooks = {}, []
     for name, module in verifier.named_modules():
-        if isinstance(module, (torch.nn.Linear, FP32LayerNorm, ReferenceAttention)):
+        if isinstance(module, (torch.nn.Linear, FP32LayerNorm)):
             hooks.append(module.register_forward_hook(
                 lambda module, args, output, name=name: observed.__setitem__(name, output.dtype)))
     try:
@@ -119,10 +113,8 @@ def test_amp_linear_attention_and_fp32_normalization_boundaries(amp, outer_amp, 
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("mode", ["relation_attention", "metric"])
-@pytest.mark.parametrize("quality_mode", ["semantic_attention", "semantic_relation"])
-def test_amp_invalid_nonfinite_inputs_are_sanitized_before_projection(mode, quality_mode):
-    verifier = _model(mode=mode, quality_mode=quality_mode).cuda().query_evidence_verifier
+def test_amp_invalid_nonfinite_inputs_are_sanitized_before_projection(mode):
+    verifier = _model().cuda().query_evidence_verifier
     inputs = _direct_inputs("cuda")
     with torch.no_grad():
         inputs["raw_query"][0, 0, 0, 0] = float("nan")

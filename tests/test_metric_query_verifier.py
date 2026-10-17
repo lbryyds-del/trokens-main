@@ -66,25 +66,6 @@ def test_single_reference_matches_cosine_margin_and_has_no_text_shortcut():
     torch.testing.assert_close(changed["relation_logits"][:, 0], output["relation_logits"][:, 0], atol=0, rtol=0)
 
 
-def test_metric_preserves_quality_parameters_outputs_and_all_base_route_tensors():
-    torch.manual_seed(123)
-    old = _model(mode="relation_attention").eval()
-    torch.manual_seed(123)
-    new = _model().eval()
-    # Quality is initialized before either rho variant and has identical RNG.
-    old_state = old.state_dict()
-    for key, value in new.state_dict().items():
-        if key in old_state and not key.endswith("architecture_version"):
-            torch.testing.assert_close(value, old_state[key], atol=0, rtol=0)
-    data = _episode()
-    before, after = _run(old, *data), _run(new, *data)
-    for key in ("query_quality_logits", "query_quality_patch_weights", "query_frame_absolute_patch_mass",
-                "query_partial_query_prototypes", "query_partial_support_prototypes",
-                "query_partial_q2s_base_logits", "query_patch_conditional_weights", "query_evidence_patch_weights"):
-        torch.testing.assert_close(before[key], after[key], atol=0, rtol=0, msg=key)
-    assert not torch.allclose(before["query_relation_logits"], after["query_relation_logits"])
-
-
 def test_metric_temperature_and_scale_really_update_from_mil():
     verifier = _model(quality=False).query_evidence_verifier
     optimizer = torch.optim.AdamW(verifier.parameters(), lr=1e-3, weight_decay=0)
@@ -109,29 +90,28 @@ def test_calibration_diagnostics_are_logged_without_gradients():
         value = metrics["verifier_" + name]
         assert value.item() == pytest.approx(expected)
         assert not value.requires_grad
-    old = _run(_model(mode="relation_attention"), post, raw, meta)
-    assert "query_metric_temperature" not in old
 
 
-@pytest.mark.parametrize("source,target", [("relation_attention", "metric"), ("metric", "relation_attention")])
+@pytest.mark.parametrize("old_version", [1, 4])
 @pytest.mark.parametrize("allow_init", [False, True])
-def test_cross_architecture_checkpoints_are_rejected_even_for_explicit_init(tmp_path, source, target, allow_init):
-    original, current = _model(mode=source), _model(mode=target)
-    state = original.state_dict()
+def test_cross_architecture_checkpoints_are_rejected_even_for_explicit_init(tmp_path, old_version, allow_init):
+    current = _model()
+    state = {k: v.clone() for k, v in current.state_dict().items()}
     before = {k: v.clone() for k, v in current.state_dict().items()}
-    with pytest.raises(ValueError, match="UNIQUENESS_MODE"):
+    state["query_evidence_verifier.architecture_version"] = torch.tensor(old_version)
+    with pytest.raises(ValueError, match="architecture"):
         validate_verifier_checkpoint(current, state, allow_init=allow_init)
     path = tmp_path / "old.pyth"
     torch.save({"model_state": state, "epoch": 19, "optimizer_state": {}}, path)
     for inflate in (False, True):
-        with pytest.raises(ValueError, match="UNIQUENESS_MODE"):
+        with pytest.raises(ValueError, match="architecture"):
             load_checkpoint(str(path), current, data_parallel=False,
                             inflation=inflate, allow_verifier_init=allow_init)
     for key, value in current.state_dict().items():
         torch.testing.assert_close(value, before[key], atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("field,value", [("UNIQUENESS_MODE", "typo"), ("METRIC_TEMPERATURE_INIT", 0.),
+@pytest.mark.parametrize("field,value", [("METRIC_TEMPERATURE_INIT", 0.),
                                        ("METRIC_SCALE_INIT", -1.), ("METRIC_SCALE_INIT", float("nan"))])
 def test_bad_metric_config_fails_early(field, value):
     model = _model()

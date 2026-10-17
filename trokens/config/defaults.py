@@ -8,7 +8,6 @@ from fvcore.common.config import CfgNode
 from . import custom_config
 
 
-
 # -----------------------------------------------------------------------------
 # Config definition
 # -----------------------------------------------------------------------------
@@ -115,30 +114,7 @@ _C.AUG.RE_COUNT = 1
 _C.AUG.RE_SPLIT = False
 
 # ---------------------------------------------------------------------------- #
-# MipUp options.
-# ---------------------------------------------------------------------------- #
-_C.MIXUP = CfgNode()
-
-# Whether to use mixup.
-_C.MIXUP.ENABLE = False
-
-# Mixup alpha.
-_C.MIXUP.ALPHA = 0.8
-
-# Cutmix alpha.
-_C.MIXUP.CUTMIX_ALPHA = 1.0
-
-# Probability of performing mixup or cutmix when either/both is enabled.
-_C.MIXUP.PROB = 1.0
-
-# Probability of switching to cutmix when both mixup and cutmix enabled.
-_C.MIXUP.SWITCH_PROB = 0.5
-
-# Label smoothing.
-_C.MIXUP.LABEL_SMOOTH_VALUE = 0.1
-
-# ---------------------------------------------------------------------------- #
-# Testing options
+# Testing options.
 # ---------------------------------------------------------------------------- #
 _C.TEST = CfgNode()
 
@@ -219,11 +195,7 @@ _C.MODEL.TRAIN_BACKBONE = False
 _C.MODEL.FEAT_EXTRACT_MODE = 'nearest'
 _C.MODEL.RESNET_TYPE = 'imagenet'
 _C.MODEL.VIT_TYPE = 'in_1k'
-_C.MODEL.USE_EXTRA_ENCODER = False
-_C.MODEL.EXTRA_ENCODER_DEPTH = 1
 _C.MODEL.RESNET_REDUCE_DIM = False
-
-
 
 
 # ---------------------------------------------------------------------------- #
@@ -304,14 +276,11 @@ _C.MF.APPROX_ATTN_TYPE = "none"
 
 # Approximation Dimension
 _C.MF.APPROX_ATTN_DIM = 128
-_C.MF.FWD_BWD = False
 _C.MF.PT_ATTENTION = 'divided_space_time'
 _C.MF.USE_PT_VISIBILITY = False
 _C.MF.POINT_SAMPLING = "None"
 _C.MF.POINTS_TO_SAMPLE = 256
 _C.MF.RANDOM_POINTS = False
-
-
 
 
 # -----------------------------------------------------------------------------
@@ -342,7 +311,6 @@ _C.DATA.PATH_PREFIX = ""
 
 # The number of frames of the input clip.
 _C.DATA.NUM_FRAMES = 8
-_C.DATA.BOTH_DIRECTION = False
 
 # The video sampling rate of the input clip.
 _C.DATA.SAMPLING_RATE = 8
@@ -430,7 +398,6 @@ _C.SOLVER = CfgNode()
 _C.SOLVER.BASE_LR = 0.1
 
 # If positive use different lr for ORViT
-_C.SOLVER.ORVIT_BASE_LR = -1.0
 
 # Learning rate policy (see utils/lr_policy.py for options and examples).
 _C.SOLVER.LR_POLICY = "cosine"
@@ -491,7 +458,6 @@ _C.SOLVER.CLIP_GRAD_VAL = None
 
 # Clip gradient at this norm before optimizer update
 _C.SOLVER.CLIP_GRAD_L2NORM = None
-_C.SOLVER.EXTRA_ENCODER_LR = 0.0
 _C.SOLVER.TEMPRATURE = 1.0
 
 # ---------------------------------------------------------------------------- #
@@ -528,7 +494,6 @@ _C.DIST_BACKEND = "nccl"
 _C.SPLIT_QKV_CHECKPOINT = False
 
 
-
 # ---------------------------------------------------------------------------- #
 # Common train/test data loader options
 # ---------------------------------------------------------------------------- #
@@ -542,8 +507,6 @@ _C.DATA_LOADER.PIN_MEMORY = True
 
 # Enable multi thread decoding.
 _C.DATA_LOADER.ENABLE_MULTI_THREAD_DECODE = False
-
-
 
 
 # -----------------------------------------------------------------------------
@@ -663,11 +626,13 @@ def assert_and_infer_cfg(cfg):
     # BN assertions.
     # TRAIN assertions.
     assert cfg.TRAIN.CHECKPOINT_TYPE in ["pytorch", "caffe2"]
-    assert cfg.NUM_GPUS == 0 or cfg.TRAIN.BATCH_SIZE % cfg.NUM_GPUS == 0
+    if cfg.TASK != "few_shot":
+        assert cfg.NUM_GPUS == 0 or cfg.TRAIN.BATCH_SIZE % cfg.NUM_GPUS == 0
 
     # TEST assertions.
     assert cfg.TEST.CHECKPOINT_TYPE in ["pytorch", "caffe2"]
-    assert cfg.NUM_GPUS == 0 or cfg.TEST.BATCH_SIZE % cfg.NUM_GPUS == 0
+    if cfg.TASK != "few_shot":
+        assert cfg.NUM_GPUS == 0 or cfg.TEST.BATCH_SIZE % cfg.NUM_GPUS == 0
 
     # Execute LR scaling by num_shards.
     if cfg.SOLVER.BASE_LR_SCALE_NUM_SHARDS:

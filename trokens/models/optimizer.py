@@ -32,13 +32,6 @@ def construct_optimizer(model, cfg):
     zero_parameters = []
     no_grad_parameters = []
 
-    orvit_bn_parameters = []
-    orvit_non_bn_parameters = []
-    orvit_zero_parameters = []
-    orvit_no_grad_parameters = []
-    extra_encoder_parameters = []
-    temporal_parameters = []
-    temporal_zero_parameters = []
     verifier_parameters = []
     verifier_zero_parameters = []
     verifier_cfg = getattr(
@@ -49,12 +42,6 @@ def construct_optimizer(model, cfg):
     if not torch.isfinite(torch.tensor(verifier_weight_decay)) or verifier_weight_decay < 0:
         raise ValueError("Verifier WEIGHT_DECAY must be finite and non-negative.")
 
-    temporal_cfg = getattr(
-        getattr(getattr(cfg, "FEW_SHOT", None), "POT_ROUTE", None),
-        "TEMPORAL_REFINEMENT",
-        None,
-    )
-    temporal_weight_decay = float(getattr(temporal_cfg, "WEIGHT_DECAY", 0.01))
 
     skip = {}
     if hasattr(model, "no_weight_decay"):
@@ -66,12 +53,6 @@ def construct_optimizer(model, cfg):
                 verifier_zero_parameters.append(p)
             else:
                 verifier_parameters.append(p)
-            continue
-        if "temporal_similarity_refiner" in name and p.requires_grad:
-            if name.endswith(".bias"):
-                temporal_zero_parameters.append(p)
-            else:
-                temporal_parameters.append(p)
             continue
         is_bn = isinstance(p, torch.nn.modules.batchnorm._NormBase)
 
@@ -90,13 +71,10 @@ def construct_optimizer(model, cfg):
 
 
     optim_params = [
-        {"params": non_bn_parameters + orvit_non_bn_parameters, "weight_decay": cfg.SOLVER.WEIGHT_DECAY},
-        {"params": zero_parameters + orvit_zero_parameters, "weight_decay": 0.0},
-        {"params": temporal_parameters, "weight_decay": temporal_weight_decay},
-        {"params": temporal_zero_parameters, "weight_decay": 0.0},
+        {"params": non_bn_parameters, "weight_decay": cfg.SOLVER.WEIGHT_DECAY},
+        {"params": zero_parameters, "weight_decay": 0.0},
         {"params": verifier_parameters, "weight_decay": verifier_weight_decay},
         {"params": verifier_zero_parameters, "weight_decay": 0.0},
-        {"params": extra_encoder_parameters, "lr": cfg.SOLVER.EXTRA_ENCODER_LR, 'extra_encoder': True},
     ]
 
     optim_params = [x for x in optim_params if len(x["params"])]
@@ -107,23 +85,12 @@ def construct_optimizer(model, cfg):
         len(bn_parameters),
         len(zero_parameters),
         len(no_grad_parameters),
-        len(orvit_non_bn_parameters),
-        len(orvit_bn_parameters),
-        len(orvit_zero_parameters),
-        len(orvit_no_grad_parameters),
-        len(extra_encoder_parameters),
-        len(temporal_parameters),
-        len(temporal_zero_parameters),
         len(verifier_parameters),
         len(verifier_zero_parameters)]), "parameter size does not match: {} + {} + {} + {} != {}".format(
         len(non_bn_parameters),
         len(bn_parameters),
         len(zero_parameters),
         len(no_grad_parameters),
-        len(orvit_non_bn_parameters),
-        len(orvit_bn_parameters),
-        len(orvit_zero_parameters),
-        len(orvit_no_grad_parameters),
         len(list(model.parameters())),
     )
     print(
@@ -182,22 +149,7 @@ def set_lr(optimizer, new_lr, log = False):
         optimizer (optim): the optimizer using to optimize the current network.
         new_lr (float): the new learning rate to set.
     """
-    if 'orvit_lr' in new_lr:
-        n_orvit = 0
-        n_p_orvit = 0
-        n_p = 0
-        n = len(optimizer.param_groups)
-        for param_group in optimizer.param_groups:
-            if param_group['is_orvit']:
-                n_orvit += 1
-                n_p_orvit += len(param_group['params'])
-            else:
-                n_p += len(param_group['params'])
-            _new_lr = new_lr['orvit_lr'] if param_group['is_orvit'] else new_lr['lr']
-            param_group["lr"] = _new_lr
-        if log: logger.info(f"Set lr {new_lr['lr']} for {n - n_orvit} groups parameters with {n_p} parameters and {new_lr['orvit_lr']} for {n_orvit} orvit group parameters with {n_p_orvit} parameters")
-    else:
-        if log: logger.info(f"Set lr {new_lr['lr']} for all paramters groups")
-        for param_group in optimizer.param_groups:
-            if 'extra_encoder' not in param_group:
-                param_group["lr"] = new_lr['lr']
+    if log:
+        logger.info("Set lr %s for all parameter groups", new_lr["lr"])
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = new_lr["lr"]

@@ -9,9 +9,6 @@ FEW_SHOT:
   TEST_QUERY_PER_CLASS: 1
   TRAIN_EPISODES: 2000
   TEST_EPISODES: 10000
-  PATCH_TOKENS_AGG: spatial
-  DIST_NORM: none
-  TRAIN_OG_EPISODES: False
   SUPPORT_TEXT_FUSION:
     ENABLE: True
     TEXT_WEIGHT: 1.0
@@ -20,70 +17,44 @@ FEW_SHOT:
   POT_ROUTE:
     ENABLE: True
     FRAME_SOFTMAX_TAU: 0.04
-    TEMPORAL_REFINEMENT:
-      ENABLE: False
-      TYPE: lite_tcn_3ch_v1
-      HIDDEN_DIM: 16
-      KERNEL_SIZE: 3
-      LONG_DILATION: 2
-      MAX_LOGIT_DELTA: 0.5
-      WEIGHT_DECAY: 0.01
-      USE_VISIBILITY: True
     QUERY_PARTIAL_ENABLE: True
     QUERY_PARTIAL_LOGIT_ALPHA: 10.0
     QUERY_PARTIAL_LOGIT_BIAS: -2.0
+  # Use the default Query evidence path.
   QUERY_CLASS_MATCHABILITY:
     ENABLE: True
+    LEARNED_VERIFIER:
+      # Raw semantic quality with a bounded Support relation correction.
+      QUALITY_HIDDEN_DIM: 64
+      QUALITY_PATCH_TEMPERATURE: 0.07
+      QUALITY_REFERENCE_TEMPERATURE: 0.10
+      QUALITY_MAX_POOL_DELTA: 0.5
+      QUALITY_MAX_REFERENCE_DELTA: 0.5
+      QUALITY_MAX_EVIDENCE_DELTA: 0.10
+      QUALITY_SCALE_INIT: 10.0
+      QUALITY_BIAS_INIT: 0.0
+      QUALITY_RELATION_STRENGTH: 1.0
+      # Post cosine evidence with learned smooth pooling/calibration.
+      METRIC_TEMPERATURE_INIT: 0.10
+      METRIC_SCALE_INIT: 10.0
+      DETACH_INPUTS: True
+      WEIGHT_DECAY: 0.01
+      SEMANTIC_MIL_WEIGHT: 0.05
+      RELATION_MIL_WEIGHT: 0.05
+      TRANSPORT_WARMUP_FRACTION: 0.05
+      QUERY_CHUNK_SIZE: 16
+      ACTIVATION_CHECKPOINT: False
+      AMP_ENABLE: True
+    # Only toggle these two flags for quality / uniqueness ablations.
     QUALITY_ENABLE: True
     UNIQUENESS_ENABLE: True
-    MODE: "positive_confuser_margin"
-    TOPK_PATCHES: 8
-    TOPK_FRAMES: 3
-    EVIDENCE_SOURCE: "post"
-    CALIBRATION_BETA: 0.25
-    TEMPERATURE: 0.10
-    DETACH_SUPPORT_STATS: True
-    MARGIN_TEMPERATURE: 0.10
-    MARGIN_BIAS: 0.0
-    NEGATIVE_AGGREGATION: "max"
-    NEGATIVE_TOPK: 2
-    NEGATIVE_TEMPERATURE: 0.10
-    DETACH_CONFUSER_SUPPORT: True
-    LOCAL_REFINEMENT_ENABLE: False
-    LOCAL_MARGIN_TEMPERATURE: 0.10
-    LOCAL_LOGIT_STRENGTH: 0.50
-    LOCAL_POSITIVE_AGGREGATION: "topk_mean"
-    LOCAL_POSITIVE_TOPK: 2
-    LOCAL_NEGATIVE_AGGREGATION: "topk_mean"
-    LOCAL_NEGATIVE_TOPK: 2
-    LOCAL_NEGATIVE_TEMPERATURE: 0.10
-    LOCAL_DETACH_REFERENCES: True
-    EVIDENCE_VERIFICATION_ENABLE: True
-    EVIDENCE_USE_VISIBILITY: True
-    EVIDENCE_POSITIVE_AGGREGATION: "topk_mean"
-    EVIDENCE_POSITIVE_TOPK: 2
-    EVIDENCE_CONFUSER_AGGREGATION: "topk_mean"
-    EVIDENCE_CONFUSER_TOPK: 2
-    EVIDENCE_AGGREGATION_TEMPERATURE: 0.10
-    EVIDENCE_DETACH_REFERENCES: True
-    FRAME_MARGIN_TEMPERATURE: 0.10
-    FRAME_MARGIN_BIAS: 0.0
-    EVIDENCE_VIDEO_TOPK_FRAMES: 3
-    EVIDENCE_MIL_TEMPERATURE: 0.10
-    EVIDENCE_MIL_LOSS_WEIGHT: 0.10
-    ABSOLUTE_MASS_ENABLE: True
-    ABSOLUTE_MASS_SOURCE: "raw"
-    ABSOLUTE_MASS_USE_VISIBILITY: True
-    ABSOLUTE_MASS_PATCH_TOPK: 8
-    ABSOLUTE_MASS_SUPPORT_TOPK_FRAMES: 3
-    ABSOLUTE_MASS_CALIBRATION_BETA: 0.25
-    ABSOLUTE_MASS_TEMPERATURE: 0.05
-    ABSOLUTE_MASS_MIN_SUPPORT_GAP: 0.0
-    ABSOLUTE_MASS_DETACH_SUPPORT_STATS: True
-    ABSOLUTE_MASS_RELIABILITY_FALLBACK: True
+    # Transport g=m*rho before both BiMHM reductions.
     ABSOLUTE_MASS_TRANSPORT_STRENGTH: 1.0
+    # At m=0 the visual match is neutral (cosine 0), then the existing -2
+    # q2s bias still applies.
     ABSOLUTE_MASS_UNMATCHED_COST: 0.0
     ABSOLUTE_MASS_ONE_SIDED: True
+    # Train both the untouched base matcher and the verified matcher.
     DUAL_LOGIT_LOSS_ENABLE: True
     BASE_LOGIT_LOSS_WEIGHT: 0.60
     VERIFIED_LOGIT_LOSS_WEIGHT: 0.40
@@ -92,17 +63,15 @@ POINT_INFO:
   PT_FIX_SAMPLING_TRAIN: True
   PT_FIX_SAMPLING_TEST: True
   USE_PT_QUERY_MASK: True
-  # Same explicit visibility policy as SAV, including backward-tracked points.
+  # Spatial routing uses visible points, including backward-tracked points.
   QUERY_MASK_MODE: visibility
   SAMPLING_TYPE: cluster_sample
   NUM_POINTS_TO_SAMPLE: 256
-  GRID_SIZE: 16
 
 TRAIN:
   ENABLE: True
   DATASET: TinyVIRAT
   CLASS_NAME: ['Opening', 'Interacts', 'Pull', 'activity_carrying', 'Exiting', 'Talking', 'activity_sitting', 'activity_walking', 'activity_standing', 'Transport_HeavyCarry', 'specialized_talking_phone', 'specialized_texting_phone']
-  BATCH_SIZE: 32
   EVAL_PERIOD: 1
   CHECKPOINT_PERIOD: 1
   AUTO_RESUME: False
@@ -114,7 +83,7 @@ DATA:
   PATH_TO_DATA_DIR: /data3/duanwei/data/tinyviratv2-3
   PATH_TO_SPLIT_DIR: /data3/duanwei/trokens-main/data/tinyvirat
   PATH_TO_TROKEN_PT_DATA: /data3/duanwei/trokens-main/data/trokens_pt_data
-  # Restore run_20260922_120538's TinyVIRAT descriptions, five per class.
+  # TinyVIRAT descriptions, five per class.
   # Group order must match TEST.CLASS_NAME; these never use the SAV bank.
   LABEL_PROMPTS:
     # 0: Opening
@@ -160,34 +129,8 @@ DATA:
     # 20: Misc
     - ["a miscellaneous activity", "a person performs an action not covered by the other classes", "an uncategorized event occurs in the scene", "the observed behavior does not match a specific action label", "a general activity takes place without a specialized category"]
   MULTI_LABEL: True
-  REVERSE_INPUT_CHANNEL: True
-  USE_OFFSET_SAMPLING: True
   USE_RAND_AUGMENT: True
-  DECODING_BACKEND: torchvision
   NUM_FRAMES: 8
-  SAMPLING_RATE: 4
-  TRAIN_JITTER_SCALES: [256, 320]
-  TRAIN_CROP_SIZE: 224
-  TEST_CROP_SIZE: 224
-  INPUT_CHANNEL_NUM: [3]
-  MEAN: [0.5, 0.5, 0.5]
-  STD: [0.5, 0.5, 0.5]
-  TRAIN_JITTER_SCALES_RELATIVE: [0.08, 1.0]
-  TRAIN_JITTER_ASPECT_RELATIVE: [0.75, 1.3333]
-  INV_UNIFORM_SAMPLE: True
-  RANDOM_FLIP: False
-
-AUG:
-  NUM_SAMPLE: 1
-  ENABLE: False
-  DIFFERENT_AUG_PER_FRAME: True
-  COLOR_JITTER: 0.0
-  AA_TYPE: rand-m7-n4-mstd0.5-inc1
-  INTERPOLATION: bicubic
-  RE_PROB: 0.0
-  RE_MODE: pixel
-  RE_COUNT: 1
-  RE_SPLIT: False
 
 SOLVER:
   BASE_LR: 0.0001
@@ -196,10 +139,7 @@ SOLVER:
   LR_POLICY: cosine
   COSINE_AFTER_WARMUP: True
   COSINE_END_LR: 0.000001
-  LRS: [1, 0.1, 0.01]
-  STEPS: [0, 20, 40]
   MAX_EPOCH: 20
-  MOMENTUM: 0.9
   WEIGHT_DECAY: 0.5
   WARMUP_EPOCHS: 5
   OPTIMIZING_METHOD: adamw
@@ -208,13 +148,9 @@ SOLVER:
 
 MODEL:
   NUM_CLASSES: 21
-  ARCH: slow
   MODEL_NAME: Pointformer
   LOSS_FUNC: bce_logit
   FEAT_EXTRACTOR: dinotxt_vitl14_reg4
-  DINO_CONFIG: None
-  VIT_TYPE: None
-  RESNET_TYPE: None
   MOTION_MODULE:
     USE_CROSS_MOTION_MODULE: True
     USE_HOD_MOTION_MODULE: True
@@ -223,7 +159,6 @@ TEST:
   ENABLE: True
   DATASET: TinyVIRAT
   CLASS_NAME: ['Opening', 'Interacts', 'Pull', 'activity_carrying', 'Entering', 'vehicle_moving', 'Exiting', 'Talking', 'vehicle_turning_left', 'activity_sitting', 'Closing', 'activity_walking', 'Push', 'specialized_using_tool', 'activity_standing', 'Transport_HeavyCarry', 'activity_gesturing', 'vehicle_turning_right', 'specialized_talking_phone', 'specialized_texting_phone', 'Misc']
-  BATCH_SIZE: 64
   DROP_EMPTY_QUERY_ROWS: True
   SEEN_LABELS: [0, 1, 2, 3, 6, 7, 9, 11, 14, 15, 18, 19]
   NOVEL_LABELS: [4, 5, 8, 10, 12, 13, 16, 17, 20]

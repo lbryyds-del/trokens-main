@@ -30,9 +30,7 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.TRAIN_OG_EPISODES = False
     cfg.FEW_SHOT.CLASS_LOSS_LAMBDA = 1.0
     cfg.FEW_SHOT.Q2S_LOSS_LAMBDA = 1.0
-    # Number of per-rank episode micro-steps accumulated before one optimizer
-    # update.  The SAV two-GPU experiment overrides this to 2 so that its
-    # effective global episode batch matches the previous four-GPU run.
+    # Per-rank episodes accumulated before one optimizer update.
     cfg.SOLVER.GRAD_ACCUM_STEPS = 1
     # Opt-in floor; zero disables the floor, not non-finite scale checks.
     cfg.SOLVER.AMP_MIN_SCALE = 0.0
@@ -41,40 +39,18 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.TEXT_WEIGHT = 1.0
     cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.VISUAL_WEIGHT = 1.0
     cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.VISUAL_DETACH = True
-    cfg.FEW_SHOT.TEXT_ALIGN = CfgNode()
-    cfg.FEW_SHOT.TEXT_ALIGN.ENABLE = False
-    cfg.FEW_SHOT.TEXT_ALIGN.LOSS_WEIGHT = 0.1
-    cfg.FEW_SHOT.TEXT_ALIGN.LOGIT_SCALE = 10.0
     cfg.FEW_SHOT.POT_ROUTE = CfgNode()
     cfg.FEW_SHOT.POT_ROUTE.ENABLE = False
     cfg.FEW_SHOT.POT_ROUTE.FRAME_SOFTMAX_TAU = 0.07
     cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_ENABLE = False
     cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_LOGIT_ALPHA = 10.0
     cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_LOGIT_BIAS = -2.0
-    cfg.FEW_SHOT.POT_ROUTE.TEMPORAL_REFINEMENT = CfgNode()
-    cfg.FEW_SHOT.POT_ROUTE.TEMPORAL_REFINEMENT.ENABLE = False
-    cfg.FEW_SHOT.POT_ROUTE.TEMPORAL_REFINEMENT.TYPE = "lite_tcn_3ch_v1"
-    cfg.FEW_SHOT.POT_ROUTE.TEMPORAL_REFINEMENT.HIDDEN_DIM = 16
-    cfg.FEW_SHOT.POT_ROUTE.TEMPORAL_REFINEMENT.KERNEL_SIZE = 3
-    cfg.FEW_SHOT.POT_ROUTE.TEMPORAL_REFINEMENT.LONG_DILATION = 2
-    cfg.FEW_SHOT.POT_ROUTE.TEMPORAL_REFINEMENT.MAX_LOGIT_DELTA = 0.5
-    cfg.FEW_SHOT.POT_ROUTE.TEMPORAL_REFINEMENT.WEIGHT_DECAY = 0.01
-    # Optional visibility input channel; invalid observations are always masked.
-    cfg.FEW_SHOT.POT_ROUTE.TEMPORAL_REFINEMENT.USE_VISIBILITY = True
 
 
-    # Query-class matchability: pure text evidence estimates whether a Query
-    # candidate should be trusted; text+Support routing still determines where.
+    # Raw semantic quality and Post metric uniqueness verify Query frames.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY = CfgNode()
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE = False
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BACKEND = "legacy"
     verifier = CfgNode()
-    verifier.HIDDEN_DIM = 128
-    verifier.NUM_HEADS = 4
-    verifier.NUM_LAYERS = 1
-    verifier.FFN_DIM = 256
-    # Old quality remains the global default; SAV opts into bounded quality v3.
-    verifier.QUALITY_MODE = "semantic_attention"
     verifier.QUALITY_HIDDEN_DIM = 64
     verifier.QUALITY_PATCH_TEMPERATURE = 0.07
     verifier.QUALITY_REFERENCE_TEMPERATURE = 0.10
@@ -85,7 +61,6 @@ def add_custom_config(cfg):
     verifier.QUALITY_BIAS_INIT = 0.0
     # Inference mechanism control: 0 removes only the final relation correction.
     verifier.QUALITY_RELATION_STRENGTH = 1.0
-    verifier.UNIQUENESS_MODE = "relation_attention"
     verifier.METRIC_TEMPERATURE_INIT = 0.10
     verifier.METRIC_SCALE_INIT = 10.0
     verifier.DETACH_INPUTS = True
@@ -98,84 +73,14 @@ def add_custom_config(cfg):
     # Follow outer CUDA autocast for Linear/MLP/attention GEMMs when opted in;
     # normalization, softmax, pooling and gates remain FP32.
     verifier.AMP_ENABLE = False
-    # The learned path never computes the old global score chain.
-    verifier.LEGACY_DIAGNOSTICS = False
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER = verifier
-    # Independent master switches; True preserves older config behavior.
+    # Independent quality and uniqueness ablations.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.QUALITY_ENABLE = True
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.UNIQUENESS_ENABLE = True
-    # ``threshold`` preserves the 8.64 scalar Support-calibration route;
-    # SAV's experiment config selects ``positive_confuser_margin``.
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.MODE = "threshold"
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.TOPK_PATCHES = 8
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.TOPK_FRAMES = 3
-    # Evidence can come from the task-adapted Pointformer output ("post") or
-    # from sampled DinoTxt tokens before positional/motion/Pointformer fusion.
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_SOURCE = "post"
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.CALIBRATION_BETA = 0.25
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.TEMPERATURE = 0.10
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DETACH_SUPPORT_STATS = True
-    # Relative positive/confuser mode controls.
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.MARGIN_TEMPERATURE = 0.10
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.MARGIN_BIAS = 0.0
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.NEGATIVE_AGGREGATION = "max"
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.NEGATIVE_TOPK = 2
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.NEGATIVE_TEMPERATURE = 0.10
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DETACH_CONFUSER_SUPPORT = False
-    # Optional local positive-vs-confuser patch refinement.  The generic
-    # default is disabled so callers that only request the scalar
-    # matchability branch retain the pre-8.65 route.
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_REFINEMENT_ENABLE = False
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_MARGIN_TEMPERATURE = 0.10
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_LOGIT_STRENGTH = 0.50
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_POSITIVE_AGGREGATION = (
-        "topk_mean"
-    )
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_POSITIVE_TOPK = 2
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_NEGATIVE_AGGREGATION = (
-        "topk_mean"
-    )
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_NEGATIVE_TOPK = 2
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_NEGATIVE_TEMPERATURE = 0.10
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LOCAL_DETACH_REFERENCES = True
-    # Optional frame verifier. It compares Positive and Confuser explanations
-    # on the same class-conditioned region pi that constructs Q_k.
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_VERIFICATION_ENABLE = False
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_USE_VISIBILITY = True
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_POSITIVE_AGGREGATION = (
-        "topk_mean"
-    )
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_POSITIVE_TOPK = 2
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_CONFUSER_AGGREGATION = (
-        "topk_mean"
-    )
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_CONFUSER_TOPK = 2
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_AGGREGATION_TEMPERATURE = 0.10
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_DETACH_REFERENCES = True
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.FRAME_MARGIN_TEMPERATURE = 0.10
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.FRAME_MARGIN_BIAS = 0.0
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_VIDEO_TOPK_FRAMES = 3
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_MIL_TEMPERATURE = 0.10
-    # Disabled generically; individual experiments can opt into the
-    # video-label MIL objective without changing compatibility callers.
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.EVIDENCE_MIL_LOSS_WEIGHT = 0.0
-    # Optional Support-calibrated absolute non-null mass. When frame evidence
-    # is also enabled, the matcher transports only target mass g=m*rho.
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_ENABLE = False
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_SOURCE = "raw"
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_USE_VISIBILITY = True
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_PATCH_TOPK = 8
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_SUPPORT_TOPK_FRAMES = 3
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_CALIBRATION_BETA = 0.25
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_TEMPERATURE = 0.05
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_MIN_SUPPORT_GAP = 0.0
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_DETACH_SUPPORT_STATS = True
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_RELIABILITY_FALLBACK = True
+    # Shared hypothesis transport and base/verified training objectives.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_TRANSPORT_STRENGTH = 1.0
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_UNMATCHED_COST = 0.0
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_ONE_SIDED = True
-    # Keep the original and verified q2s objectives separately supervised
-    # when local refinement is enabled.  Disabled by default for compatibility.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DUAL_LOGIT_LOSS_ENABLE = False
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BASE_LOGIT_LOSS_WEIGHT = 0.50
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.VERIFIED_LOGIT_LOSS_WEIGHT = 0.50
@@ -199,10 +104,7 @@ def add_custom_config(cfg):
     cfg.POINT_INFO.HOD.NUM_CLUSTERS = 16
     cfg.POINT_INFO.HOD_MIN = True
     cfg.POINT_INFO.HOD.GET_FEAT = True
-    cfg.POINT_INFO.HOD.TEMPORAL_PYRAMID = False
-    cfg.POINT_INFO.HOD.TEMPORAL_PYRAMID_LEVELS = 3
     cfg.POINT_INFO.HOD.PRESERVE_TEMPORAL = True
-    cfg.POINT_INFO.USE_CORRELATION = False
 
     # motion module config
     cfg.MODEL.MOTION_MODULE = CfgNode()

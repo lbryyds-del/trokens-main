@@ -111,7 +111,6 @@ def id_based_sampling(cluster_ids, num_samples):
     return sampled_points
 
 
-
 def estimate_cost_matrix(gt_labels, cluster_labels):
     """Estimate the cost matrix
 
@@ -211,23 +210,6 @@ def get_feat_at_level(hod_feat, level):
         split_feats = torch.cat(split_feats, axis=-1)
         return split_feats
 
-def compute_temporal_pyramid(hod_feat, levels=3):
-    """Compute temporal pyramid
-
-    Args:
-        hod_feat (np.ndarray): HOD features
-        levels (int): Number of levels
-
-    Returns:
-        np.ndarray: Temporal pyramid features
-    """
-    pyramid_feats = []
-    for level in range(levels):
-        pyramid_feats.append(get_feat_at_level(hod_feat, level+1))
-    pyramid_feats = torch.cat(pyramid_feats, axis=-1)
-    return pyramid_feats
-
-
 
 def get_hist_vector(bin_indices, bin_weigthts, num_bins, preserve_temporal=False):
     """Get histogram vector
@@ -253,7 +235,6 @@ def get_hist_vector(bin_indices, bin_weigthts, num_bins, preserve_temporal=False
         else:
             pt_vec = np.bincount(pt_bin_indices, weights=pt_bin_weights,
                                                         minlength=num_bins)
-
 
 
         final_vec.append(pt_vec[None])
@@ -428,7 +409,6 @@ def get_hod_based_clustering(points, num_bins, req_c=None,
     return req_c_clusters
 
 
-
 def hod_based_sampling(points, points_to_sample=None, num_bins=32,
                         num_clusters=None, id_based_sampling_on=True,
                         min_samples_per_cluster=1):
@@ -534,7 +514,6 @@ def average_cluster_points(points, cluster_ids):
     averaged_points = np.einsum('tnd,nm->tmd', points, one_hot) / cluster_sizes
 
     return averaged_points
-
 
 
 def hod_obj_id_sampling(cfg, pt_dict, num_bins=32, num_clusters=16,

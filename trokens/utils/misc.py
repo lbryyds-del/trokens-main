@@ -17,7 +17,6 @@ from torch import nn
 
 import trokens.utils.logging as logging
 import trokens.utils.multiprocessing as mpu
-from trokens.datasets.utils import pack_pathway_output
 from trokens.models.batchnorm_helper import SubBatchNorm3d
 from trokens.utils.env import pathmgr
 
@@ -84,65 +83,6 @@ def cpu_mem_usage():
     return usage, total
 
 
-def _get_model_analysis_input(cfg, use_train_input):
-    """
-    Return a dummy input for model analysis with batch size 1. The input is
-        used for analyzing the model (counting flops and activations etc.).
-    Args:
-        cfg (CfgNode): configs. Details can be found in
-            trokens/config/defaults.py
-        use_train_input (bool): if True, return the input for training. Otherwise,
-            return the input for testing.
-
-    Returns:
-        inputs: the input for model analysis.
-    """
-    rgb_dimension = 3
-    if use_train_input:
-        if cfg.TRAIN.DATASET in ["imagenet", "imagenetprefetch"]:
-            input_tensors = torch.rand(
-                rgb_dimension,
-                cfg.DATA.TRAIN_CROP_SIZE,
-                cfg.DATA.TRAIN_CROP_SIZE,
-            )
-        else:
-            input_tensors = torch.rand(
-                rgb_dimension,
-                cfg.DATA.NUM_FRAMES,
-                cfg.DATA.TRAIN_CROP_SIZE,
-                cfg.DATA.TRAIN_CROP_SIZE,
-            )
-    else:
-        if cfg.TEST.DATASET in ["imagenet", "imagenetprefetch"]:
-            input_tensors = torch.rand(
-                rgb_dimension,
-                cfg.DATA.TEST_CROP_SIZE,
-                cfg.DATA.TEST_CROP_SIZE,
-            )
-        else:
-            input_tensors = torch.rand(
-                rgb_dimension,
-                cfg.DATA.NUM_FRAMES,
-                cfg.DATA.TEST_CROP_SIZE,
-                cfg.DATA.TEST_CROP_SIZE,
-            )
-    model_inputs = pack_pathway_output(cfg, input_tensors)
-    for i in range(len(model_inputs)):
-        model_inputs[i] = model_inputs[i].unsqueeze(0)
-        if cfg.NUM_GPUS:
-            model_inputs[i] = model_inputs[i].cuda(non_blocking=True)
-
-    # If detection is enabled, count flops for one proposal.
-    bbox = torch.tensor([[0, 0, 1.0, 0, 1.0]])
-    if cfg.NUM_GPUS:
-        bbox = bbox.cuda()
-    md = {'orvit_bboxes': bbox[:, -4:].reshape(1, 1,1,4).expand(1,cfg.DATA.NUM_FRAMES,cfg.ORVIT.O,4)}
-    if cfg.DETECTION.ENABLE:
-        inputs = (model_inputs, md, bbox)
-    else:
-        inputs = (model_inputs, md)
-    return inputs
-
 def get_input_for_flop_calc(cfg, loader, batch_size=1, device='cuda', skip_feat_extractor=False):
     video, _, _, metadata = loader.dataset.__getitem__((0,0,0))
 
@@ -161,7 +101,6 @@ def get_input_for_flop_calc(cfg, loader, batch_size=1, device='cuda', skip_feat_
     if skip_feat_extractor:
         input_to_use['skip_feat_extractor'] = True
     return input_to_use
-
 
 
 def get_model_stats(model, cfg, mode, loader, skip_feat_extractor=False):
@@ -344,7 +283,6 @@ def launch_job(cfg, init_method, func, daemon=False, new_dist_init=False, args=N
             daemonic processes will be created
     """
     return func(cfg=cfg, args=args, wandb_run=wandb_run)
-
 
 
 def get_class_names(path, parent_path=None, subset_path=None):
