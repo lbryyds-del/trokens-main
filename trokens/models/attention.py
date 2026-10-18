@@ -1,6 +1,7 @@
 """Attention modules"""
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
 from einops import rearrange
 from trokens.models.common import DropPath, Mlp
 
@@ -20,8 +21,16 @@ class Attention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.use_mask = use_mask
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask=None, key_bias=None):
         """Forward pass"""
+        return self.aggregate(*self.prepare(x, mask, key_bias))
+
+    def prepare_logits(self, x, mask=None):
+        """Project once; retain PRE-softmax scores, unmodified V and key mask.
+
+        Different label priors can reuse these temporal scores without sharing
+        the final attention probabilities. Spatial inputs remain serial.
+        """
         batch_size, seq_len, feat_dim = x.shape
         if self.with_qkv:
             qkv = self.qkv(x).reshape(batch_size, seq_len, 3, self.num_heads,
@@ -33,7 +42,7 @@ class Attention(nn.Module):
             q, k, v  = qkv, qkv, qkv
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
-        valid_rows = None
+        key_mask = None
         if self.use_mask:
             mask = mask.to(device=attn.device).bool()
             if len(mask.shape) == 2:
@@ -43,6 +52,16 @@ class Attention(nn.Module):
                 # extra_dim for heads
                 # mask -> bs x num_spacetime_tokens x num_spacetime_tokens
                 key_mask = mask[:, None, :, :]
+        return attn, v, key_mask
+
+    def _weights(self, attn, key_mask, key_bias):
+        if key_bias is not None:
+            if key_bias.shape != (attn.shape[0], attn.shape[-1]):
+                raise ValueError("Attention key_bias must be [batch, source/key tokens].")
+            # Broadcast across heads and query positions, NOT the key axis.
+            attn = attn + key_bias[:, None, None, :].to(attn.dtype)
+        valid_rows = None
+        if key_mask is not None:
             valid_rows = key_mask.any(dim=-1, keepdim=True)
             attn = attn.masked_fill(~key_mask, float('-inf'))
             # softmax([-inf, ...]) has NaN forward AND backward. Evaluate
@@ -50,11 +69,23 @@ class Attention(nn.Module):
             attn = torch.where(valid_rows, attn, torch.zeros_like(attn))
 
         attn = attn.softmax(dim=-1)
-        if self.use_mask:
+        if key_mask is not None:
             attn = attn.masked_fill(~key_mask, 0.0)
         attn = self.attn_drop(attn)
+        return attn, valid_rows
 
-        x = (attn @ v).transpose(1, 2).reshape(batch_size, seq_len, feat_dim)
+    def prepare(self, x, mask=None, key_bias=None):
+        logits, v, key_mask = self.prepare_logits(x, mask)
+        attn, valid_rows = self._weights(logits, key_mask, key_bias)
+        return attn, v, valid_rows
+
+    def aggregate_logits(self, logits, v, key_mask=None, key_bias=None):
+        attn, valid_rows = self._weights(logits, key_mask, key_bias)
+        return self.aggregate(attn, v, valid_rows)
+
+    def aggregate(self, attn, v, valid_rows=None):
+        batch_size, heads, seq_len, head_dim = v.shape
+        x = (attn @ v).transpose(1, 2).reshape(batch_size, seq_len, heads * head_dim)
         if self.with_qkv:
             x = self.proj(x)
             x = self.proj_drop(x)
@@ -101,8 +132,13 @@ class TrajectoryAttentionBlock(nn.Module):
         self.mlp = nn.Sequential(*self.mlp)
 
         self.use_pt_visibility = use_pt_visibility
+        self.checkpoint_mlp = False
 
-    def forward(self, x, thw, pt_mask, with_cls_token=True):
+    def _mlp(self, x):
+        return self.mlp(self.norm2(x))
+
+    def forward(self, x, thw, pt_mask, with_cls_token=True,
+                temporal_state=None, temporal_bias=None, spatial_bias=None):
         """Forward pass"""
         if self.pt_attention == 'divided_space_time':
             if self.cfg.MODEL.USE_CLS_TOKEN:
@@ -120,8 +156,13 @@ class TrajectoryAttentionBlock(nn.Module):
             if self.use_pt_visibility:
                 temporal_mask = rearrange(temporal_mask, 'b (h w t) -> (b h w) t',
                                             b=batch_size, h=height, w=width, t=num_frames)
-            res_temporal = self.drop_path(
-                            self.temporal_attn(self.temporal_norm1(xt), temporal_mask))
+            if temporal_state is None:
+                temporal_output = self.temporal_attn(
+                    self.temporal_norm1(xt), temporal_mask, key_bias=temporal_bias)
+            else:
+                temporal_output = self.temporal_attn.aggregate_logits(
+                    *temporal_state, key_bias=temporal_bias)
+            res_temporal = self.drop_path(temporal_output)
             res_temporal = rearrange(res_temporal, '(b h w) t m -> b (h w t) m',
                                     b=batch_size, h=height, w=width, t=num_frames)
             res_temporal = self.temporal_fc(res_temporal)
@@ -160,7 +201,12 @@ class TrajectoryAttentionBlock(nn.Module):
                                             b=batch_size,h=height,w=width,t=num_frames)
 
 
-            res_spatial = self.drop_path(self.attn(self.norm1(xs), spatial_mask))
+            if spatial_bias is not None and self.cfg.MODEL.USE_CLS_TOKEN:
+                # CLS is a neutral key (g=1); patch priors also affect its query.
+                spatial_bias = torch.cat((spatial_bias.new_zeros(batch_size * num_frames, 1),
+                                          spatial_bias), dim=-1)
+            res_spatial = self.drop_path(self.attn(
+                self.norm1(xs), spatial_mask, key_bias=spatial_bias))
             if self.cfg.MODEL.USE_CLS_TOKEN:
                 ### Taking care of CLS token
                 cls_token = res_spatial[:,0,:]
@@ -190,5 +236,8 @@ class TrajectoryAttentionBlock(nn.Module):
             raise NotImplementedError(f"Unsupported attention type {self.pt_attention}")
 
 
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        mlp = (checkpoint(self._mlp, x, use_reentrant=False)
+               if self.checkpoint_mlp and self.training and torch.is_grad_enabled()
+               else self._mlp(x))
+        x = x + self.drop_path(mlp)
         return x, thw

@@ -1,0 +1,10 @@
+_BASE_: sav_label_pre_temporal_fast.yaml
+
+# v8 single-variable ablation vs fast v6:
+# Raw Support + text still conditions Query temporal/spatial attention.
+# Post matching Support prototypes + text now conditions final Query readout.
+# Same five losses, masks, sampler, precision and 5x8 execution/checkpoints.
+OUTPUT_DIR: output/sav_label_pre_temporal_post_readout_st_bias_cls
+FEW_SHOT:
+  LABEL_PRE_TEMPORAL:
+    POST_SUPPORT_READOUT: True

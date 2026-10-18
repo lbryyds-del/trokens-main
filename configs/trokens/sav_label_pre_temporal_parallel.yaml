@@ -1,0 +1,15 @@
+_BASE_: sav_label_pre_temporal.yaml
+
+# Same model/weights/losses, batched class execution. Existing runs are unchanged.
+OUTPUT_DIR: output/sav_label_pre_temporal_parallel_st_bias_cls
+FEW_SHOT:
+  LABEL_PRE_TEMPORAL:
+    CLASS_CHUNK_SIZE: 5
+    VIDEO_CHUNK_SIZE: 8
+    # Raw m is independent of Post: batch classes and build references once.
+    BATCH_RAW_QUALITY: True
+    # Low-memory execution: one outer checkpoint, no nested verifier checkpoint.
+    ACTIVATION_CHECKPOINT: True
+  QUERY_CLASS_MATCHABILITY:
+    LEARNED_VERIFIER:
+      ACTIVATION_CHECKPOINT: False

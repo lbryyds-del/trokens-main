@@ -61,6 +61,36 @@ def episode_labels_from_global(labels, episode_class_ids):
     return labels.float().index_select(1, episode_class_ids)
 
 
+def unpack_episode_output(model_out):
+    """Single-path outputs may include a global head, but no shared Patch tensor."""
+    if isinstance(model_out, dict) and model_out.get("single_path_episode", False):
+        return model_out.get("global_classification_logits"), None, model_out
+    if isinstance(model_out, tuple) and len(model_out) == 3:
+        return model_out
+    preds, patches = model_out
+    return preds, patches, None
+
+
+def single_path_episode_targets(output, labels, metadata):
+    """Align supervision AFTER forward; reject silent class/Query permutations."""
+    ids = get_episode_class_ids(metadata, labels.device)
+    actual_ids = output["query_partial_label_axis_global_labels"].to(labels.device)
+    support = torch.as_tensor(np.array(metadata["sample_type"]) == "support",
+                              device=labels.device, dtype=torch.bool)
+    indices = (~support).nonzero(as_tuple=False).flatten()
+    actual_indices = output["query_partial_query_sample_indices"].to(labels.device)
+    if not torch.equal(ids, actual_ids) or not torch.equal(indices, actual_indices):
+        raise ValueError("Single-path output does not match episode Query/class order.")
+    targets = episode_labels_from_global(labels, ids).index_select(0, indices)
+    if "episode_label_known_mask" in metadata:
+        known = metadata["episode_label_known_mask"].to(labels.device).bool().index_select(0, indices)
+        targets = targets.masked_fill(~known, -1)
+    if targets.shape != output["query_partial_q2s_logits"].shape:
+        raise ValueError("Single-path logits and supervised episode targets must match.")
+    return dict(query_batch_labels=targets, episode_class_ids=ids,
+                query_condition=~support, query_labels=labels[~support], support_labels=ids)
+
+
 def multilabel_classification_loss(preds, labels, cfg, loss_fun):
     """Auxiliary BCE over seen classes to avoid negative-only novel supervision."""
     labels = labels.float()

@@ -30,6 +30,27 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.TRAIN_OG_EPISODES = False
     cfg.FEW_SHOT.CLASS_LOSS_LAMBDA = 1.0
     cfg.FEW_SHOT.Q2S_LOSS_LAMBDA = 1.0
+    # Opt-in single-path Label -> Patch priors inside serial temporal/spatial attention.
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL = CfgNode()
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE = False
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ROUTE_TEMPERATURE = 0.04
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.GATE_STRENGTH = 0.25
+    # Fixed lambda in softmax(QK/sqrt(d) + lambda * log(g + eps)); zero ablates
+    # only that attention bias, not the downstream class-conditioned readout.
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.TEMPORAL_BIAS_SCALE = 1.0
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.SPATIAL_BIAS_SCALE = 1.0
+    # Keep Raw Support+text for encoding; optionally use Post matching Support
+    # prototypes+text ONLY for the final Query readout. False preserves v5/v6.
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.POST_SUPPORT_READOUT = False
+    # Fold independent classes into the video batch; 1 keeps serial execution.
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.CLASS_CHUNK_SIZE = 1
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.VIDEO_CHUNK_SIZE = 4
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ACTIVATION_CHECKPOINT = True
+    # Raw quality is class-conditioned but independent of Post encodings.
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.BATCH_RAW_QUALITY = False
+    # Faster high-memory alternative to checkpointing the entire encoder/readout.
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.MLP_CHECKPOINT = False
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.READOUT_CHECKPOINT = False
     # Per-rank episodes accumulated before one optimizer update.
     cfg.SOLVER.GRAD_ACCUM_STEPS = 1
     # Opt-in floor; zero disables the floor, not non-finite scale checks.

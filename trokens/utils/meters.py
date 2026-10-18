@@ -389,10 +389,13 @@ class ValMeter(object):
             "RAM": "{:.2f}/{:.2f}G".format(*misc.cpu_mem_usage()),
         }
         if self._cfg.DATA.MULTI_LABEL:
-            stats["map"] = get_map(
-                torch.cat(self.all_preds).cpu().numpy(),
-                torch.cat(self.all_labels).cpu().numpy(),
-            )
+            # Single-path episodes have no global classifier predictions.
+            # Their Base/Novel/HM AP is accumulated by the episodic evaluator.
+            if not self._cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE:
+                stats["map"] = get_map(
+                    torch.cat(self.all_preds).cpu().numpy(),
+                    torch.cat(self.all_labels).cpu().numpy(),
+                )
         else:
             if self.metric1_name:
                 metric1_value = self.num_top1_mis / self.num_samples

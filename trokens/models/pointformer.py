@@ -15,6 +15,7 @@ from torch.nn.init import trunc_normal_
 from trokens.models.attention import TrajectoryAttentionBlock
 from trokens.config.query_judgments import resolve_query_judgments
 from trokens.models.query_evidence_verifier import QueryEvidenceVerifier, build_query_q2s_aux
+from trokens.models.label_conditioned_routing import LabelPreTemporalRouting, label_conditioned_episode
 from trokens.models.branches.motion_blocks import (
     CrossMotionModule,
     HODMotionModule
@@ -80,6 +81,7 @@ class Pointformer(nn.Module):
         self.attn_drop_rate = cfg.MF.ATTN_DROPOUT
         self.head_act = cfg.MF.HEAD_ACT
         self.cfg = cfg
+        self.use_label_pre_temporal = bool(cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE)
         self.pot_route_cfg = cfg.FEW_SHOT.POT_ROUTE
         self.support_text_fusion_cfg = getattr(
             cfg.FEW_SHOT,
@@ -306,6 +308,35 @@ class Pointformer(nn.Module):
 
         # Build the evidence heads after the main model initialization.
         self._init_query_evidence_verifier()
+        self._init_label_pre_temporal()
+
+    def _init_label_pre_temporal(self):
+        self.label_pre_temporal = None
+        if not self.use_label_pre_temporal:
+            return
+        if (not self.use_query_partial_q2s or not self.use_support_text_fusion
+                or self.depth != 1 or self.cfg.MF.PT_ATTENTION != "divided_space_time"
+                or self.cfg.MODEL.ADAPOOLING.ENABLE or not self.cfg.POINT_INFO.ENABLE
+                or not self.cfg.FEW_SHOT.USE_MODEL or self.cfg.MODEL.TRAIN_BACKBONE):
+            raise ValueError("LABEL_PRE_TEMPORAL requires frozen DinoTxt, tracked points, "
+                             "Support/text Query routing, depth=1 and no adaptive pooling.")
+        class_weight = float(self.cfg.FEW_SHOT.CLASS_LOSS_LAMBDA)
+        if not np.isfinite(class_weight) or class_weight < 0:
+            raise ValueError("CLASS_LOSS_LAMBDA must be finite and non-negative.")
+        with torch.random.fork_rng(devices=[]):
+            self.label_pre_temporal = LabelPreTemporalRouting(
+                self.embed_dim, self.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL,
+                global_classifier=class_weight > 0)
+        self.blocks[0].checkpoint_mlp = bool(self.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.MLP_CHECKPOINT)
+        if ((self.blocks[0].checkpoint_mlp or self.label_pre_temporal.readout_checkpoint)
+                and self.label_pre_temporal.activation_checkpoint):
+            raise ValueError("Use either full LABEL_PRE_TEMPORAL checkpoint or selective MLP/readout checkpoints.")
+        # Reuse the existing conditional encodings for global supervision.
+        # A zero weight remains an explicit no-classifier ablation.
+        self.head.requires_grad_(class_weight > 0)
+        self.pre_logits.requires_grad_(class_weight > 0)
+        if hasattr(self, "agg_cls_token"):
+            self.agg_cls_token.requires_grad_(False)
 
     def _init_query_evidence_verifier(self):
         match_cfg = getattr(self.cfg.FEW_SHOT, "QUERY_CLASS_MATCHABILITY", None)
@@ -1771,10 +1802,9 @@ class Pointformer(nn.Module):
                 None,
             )
             judgments = resolve_query_judgments(match_cfg)
-            raw_evidence_requested = judgments.quality
+            raw_evidence_requested = judgments.quality or getattr(self, "use_label_pre_temporal", False)
             if (
-                bool(getattr(match_cfg, "ENABLE", False))
-                and raw_evidence_requested
+                raw_evidence_requested
             ):
                 if self.feat_extractor_type != "dinotxt_vitl14_reg4":
                     raise ValueError(
@@ -1834,6 +1864,9 @@ class Pointformer(nn.Module):
         if inter_feat is None:
             inter_feat = torch.zeros_like(reference_feat)
         fused_feat = app_feat + intra_feat + inter_feat
+
+        if getattr(self, "use_label_pre_temporal", False):
+            return label_conditioned_episode(self, fused_feat, matchability_evidence_tokens, metadata)
 
         cls_x, patch_x = self.pt_forward(fused_feat, metadata)
         if 'support_mask' in metadata and 'episode_positive_labels' in metadata:

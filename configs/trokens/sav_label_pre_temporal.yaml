@@ -1,0 +1,21 @@
+_BASE_: sav.yaml
+
+# Single-path experiment. Original sav.yaml stays unchanged for comparison.
+# v6: asymmetric conditions, serial temporal + spatial attention-logit bias.
+OUTPUT_DIR: output/sav_label_pre_temporal_st_bias_cls
+FEW_SHOT:
+  # Restore the original global classification supervision using the existing
+  # conditional encodings; no extra neutral encoder pass.
+  CLASS_LOSS_LAMBDA: 1.0
+  LABEL_PRE_TEMPORAL:
+    ENABLE: True
+    ROUTE_TEMPERATURE: 0.04
+    GATE_STRENGTH: 0.25
+    TEMPORAL_BIAS_SCALE: 1.0
+    SPATIAL_BIAS_SCALE: 1.0
+    CLASS_CHUNK_SIZE: 1
+    VIDEO_CHUNK_SIZE: 4
+    ACTIVATION_CHECKPOINT: True
+  QUERY_CLASS_MATCHABILITY:
+    LEARNED_VERIFIER:
+      ACTIVATION_CHECKPOINT: True

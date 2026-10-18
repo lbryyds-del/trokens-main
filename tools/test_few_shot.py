@@ -28,6 +28,8 @@ from few_shot_multilabel import (
     q2s_cos_sim_fp32,
     support_query_split_multilabel,
     support_query_split_multilabel_conditioned,
+    unpack_episode_output,
+    single_path_episode_targets,
     update_ap_storage,
 )
 import trokens.utils.checkpoint as cu
@@ -274,16 +276,15 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
             input_dict = {'video':inputs, 'metadata':meta}
             # for few shot, patch tokens are also returning
             model_out = model(input_dict)
-            if isinstance(model_out, tuple) and len(model_out) == 3:
-                preds, patch_tokens, few_shot_aux = model_out
-            else:
-                preds, patch_tokens = model_out
-                few_shot_aux = None
+            preds, patch_tokens, few_shot_aux = unpack_episode_output(model_out)
+            single_path = isinstance(few_shot_aux, dict) and few_shot_aux.get("single_path_episode", False)
             if isinstance(preds, tuple):
                 preds, _ = preds
 
             multilabel_episode = is_multilabel_episode(cfg, labels, meta)
-            if multilabel_episode:
+            if single_path:
+                patch_support_query_dict = single_path_episode_targets(few_shot_aux, labels, meta)
+            elif multilabel_episode:
                 base_support_query_dict = support_query_split_multilabel(
                     patch_tokens, labels, meta)
                 if few_shot_aux_has_support_tokens(few_shot_aux):
@@ -400,7 +401,8 @@ def test_epoch(val_loader, model, val_meter, cur_epoch, cfg):
         )
 
 
-        val_meter.update_predictions(preds, labels)
+        if preds is not None:
+            val_meter.update_predictions(preds, labels)
         if should_log_iter_stats(progress_bar):
             val_meter.log_iter_stats(cur_epoch, cur_iter)
         if progress_bar is not None:

@@ -1,0 +1,13 @@
+_BASE_: sav_label_pre_temporal_parallel.yaml
+
+# High-memory execution: keep the same parameters, masks, losses and sampler.
+# Attention/verifier results are saved; only MLP/text-readout are recomputed.
+OUTPUT_DIR: output/sav_label_pre_temporal_fast_st_bias_cls
+FEW_SHOT:
+  LABEL_PRE_TEMPORAL:
+    CLASS_CHUNK_SIZE: 5
+    # Keep bounded batches; profile full-size forward/backward before increasing.
+    VIDEO_CHUNK_SIZE: 8
+    ACTIVATION_CHECKPOINT: False
+    MLP_CHECKPOINT: True
+    READOUT_CHECKPOINT: True

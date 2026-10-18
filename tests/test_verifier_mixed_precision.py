@@ -113,7 +113,7 @@ def test_amp_linear_attention_and_fp32_normalization_boundaries(amp, outer_amp):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_amp_invalid_nonfinite_inputs_are_sanitized_before_projection(mode):
+def test_amp_invalid_nonfinite_inputs_are_sanitized_before_projection():
     verifier = _model().cuda().query_evidence_verifier
     inputs = _direct_inputs("cuda")
     with torch.no_grad():

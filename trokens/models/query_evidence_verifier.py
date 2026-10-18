@@ -224,6 +224,39 @@ class QueryEvidenceVerifier(nn.Module):
             return checkpoint(function, *args, use_reentrant=False)
         return function(*args)
 
+    @staticmethod
+    def _support_signs(support_labels, support_known, classes):
+        if support_labels.ndim != 2 or support_labels.shape[1] != classes:
+            raise ValueError("Verifier Support labels must have shape [S,K].")
+        known = torch.isfinite(support_labels) & (support_labels >= 0) & (support_labels <= 1)
+        if support_known is not None:
+            if support_known.shape != support_labels.shape:
+                raise ValueError("Support known-label mask must have shape [S,K].")
+            known = known & support_known.bool()
+        return (support_labels > 0.5) & known, (support_labels <= 0.5) & known
+
+    def compute_raw_quality(self, raw_query, raw_support, text, query_valid,
+                            support_raw_valid, support_labels, support_known=None):
+        """Class-batched Raw-only m; learned references remain differentiable.
+
+        Independent of Post/gates/rho, so the conditional encoder can hoist
+        this once per class group instead of recomputing per video AND class.
+        """
+        if not self.quality:
+            return {}
+        if raw_query is None or raw_support is None:
+            raise ValueError("Learned quality requires aligned pre-Pointformer Raw DinoTxt tokens.")
+        precision = (nullcontext() if self.amp_enabled and raw_query.is_cuda
+                     else torch.autocast(device_type=raw_query.device.type, enabled=False))
+        with precision:
+            positive, negative = self._support_signs(support_labels, support_known, text.shape[0])
+            if raw_query.shape[:3] != query_valid.shape or raw_support.shape[:3] != support_raw_valid.shape:
+                raise ValueError("Raw verifier tokens and validity masks must align in B/T/N.")
+            qr, sr, et = (_unit(self._input(x)) for x in (raw_query, raw_support, text))
+            return self.semantic_quality(
+                qr, sr, et, query_valid, support_raw_valid, positive, negative,
+                self._call, self.chunk_size)
+
 
     def _metric_aggregate(self, similarities, valid):
         """Count-normalized smooth maximum, separately for each reference set.
@@ -256,11 +289,13 @@ class QueryEvidenceVerifier(nn.Module):
 
     def forward(self, *, raw_query, raw_support, text, post_query, post_references,
                 query_weights, query_valid, support_raw_valid, support_frame_valid,
-                support_labels, support_known=None):
+                support_labels, support_known=None, quality_output=None):
         """Only Support labels enter this API; outputs are [Q,K,T] (or weights).
 
         post_references is [S,K,T,D], never the class-averaged matcher prototype.
         Detach is applied BEFORE learned projections, not after learned memory.
+        Optional quality_output reuses an externally computed Raw-only m;
+        an empty dict requests rho only when the caller merges m afterward.
         """
         precision = (nullcontext() if self.amp_enabled and post_query.is_cuda
                      else torch.autocast(device_type=post_query.device.type, enabled=False))
@@ -268,25 +303,17 @@ class QueryEvidenceVerifier(nn.Module):
             return self._forward_impl(
                 raw_query, raw_support, text, post_query, post_references,
                 query_weights, query_valid, support_raw_valid, support_frame_valid,
-                support_labels, support_known,
+                support_labels, support_known, quality_output,
             )
 
     def _forward_impl(self, raw_query, raw_support, text, post_query, post_references,
                       query_weights, query_valid, support_raw_valid, support_frame_valid,
-                      support_labels, support_known):
+                      support_labels, support_known, quality_output=None):
         q, t, n, _ = post_query.shape
         k = text.shape[0]
-        if support_labels.ndim != 2 or support_labels.shape[1] != k:
-            raise ValueError("Verifier Support labels must have shape [S,K].")
-        known = torch.isfinite(support_labels) & (support_labels >= 0) & (support_labels <= 1)
-        if support_known is not None:
-            if support_known.shape != support_labels.shape:
-                raise ValueError("Support known-label mask must have shape [S,K].")
-            known = known & support_known.bool()
-        positive_labels = (support_labels > 0.5) & known
-        negative_labels = (support_labels <= 0.5) & known
+        positive_labels, negative_labels = self._support_signs(support_labels, support_known, k)
         frame_valid = query_valid.any(dim=-1)
-        if self.quality:
+        if self.quality and quality_output is None:
             if raw_query is None or raw_support is None:
                 raise ValueError("Learned quality requires aligned pre-Pointformer Raw DinoTxt tokens.")
             if raw_query.shape[:3] != (q, t, n) or raw_support.shape[:3] != support_raw_valid.shape:
@@ -296,7 +323,7 @@ class QueryEvidenceVerifier(nn.Module):
             qp = _unit(self._input(post_query))
             sp = _unit(self._input(post_references))
             pi = self._input(query_weights).float()
-        output = {}
+        output = {} if quality_output is None else dict(quality_output)
 
         def masks(valid_frames):
             # [K,S,T] -> [K,R], preserving per-class Support identities.
@@ -307,7 +334,7 @@ class QueryEvidenceVerifier(nn.Module):
             # Retain the safe dummy element used for empty reference sets.
             return torch.cat((valid, ~available.unsqueeze(-1)), dim=-1), available
 
-        if self.quality:
+        if self.quality and quality_output is None:
             output.update(self.semantic_quality(
                 qr, sr, et, query_valid, support_raw_valid, positive_labels, negative_labels,
                 self._call, self.chunk_size,
@@ -433,8 +460,30 @@ def build_query_q2s_aux(model, values, metadata, raw):
         support_frame_valid=support_frame_valid, support_labels=labels[support_mask],
         support_known=known[support_mask],
     )
-    shape = (*base_logits.shape, values.shape[1])
-    neutral = values.new_ones(shape, dtype=torch.float32)
+    return finish_query_evidence_aux(
+        model, result, query_prototypes, support_prototypes, query_weights,
+        query_valid, hypothesis_weights, outputs)
+
+
+def finish_query_evidence_aux(model, result, query_prototypes, support_prototypes,
+                              query_weights, query_valid, hypothesis_weights, outputs):
+    """Shared transport/diagnostics for legacy and single-path encoders."""
+    cfg = model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY
+    judgments = resolve_query_judgments(cfg)
+    base_logits = result["query_partial_q2s_base_logits"]
+    if not (judgments.quality or judgments.uniqueness):
+        result.update(query_partial_q2s_logits=base_logits,
+                      query_partial_q2s_temporal_logits=base_logits,
+                      query_class_matchability=torch.ones_like(base_logits))
+        return result
+    from trokens.models.query_matching import (
+        classwise_frame_similarity, factorize_frame_hypothesis_states,
+        hypothesis_mass_bimhm_logits,
+    )
+    verifier = model.query_evidence_verifier
+    alpha = float(getattr(model.pot_route_cfg, "QUERY_PARTIAL_LOGIT_ALPHA", 10.0))
+    shape = (*base_logits.shape, query_prototypes.shape[2])
+    neutral = base_logits.new_ones(shape, dtype=torch.float32)
     mass = outputs.get("quality", neutral)
     rho = outputs.get("relation", neutral)
     states = factorize_frame_hypothesis_states(mass, rho)
@@ -463,7 +512,7 @@ def build_query_q2s_aux(model, values, metadata, raw):
         "query_frame_transport_logit_delta": transport["transport_delta"],
         "query_frame_temporal_logit_delta": transport["logits"] - base_logits.float(),
         "query_frame_max_t_switch_fraction": transport["winner_switch_fraction"],
-        "query_verifier_transport_strength": values.new_tensor(strength, dtype=torch.float32),
+        "query_verifier_transport_strength": base_logits.new_tensor(strength, dtype=torch.float32),
     })
     for state, value in states.items():
         result["query_frame_" + state] = value

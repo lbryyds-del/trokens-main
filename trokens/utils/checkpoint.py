@@ -331,6 +331,54 @@ def inflate_weight(state_dict_2d, state_dict_3d):
     return state_dict_inflated
 
 
+def validate_label_pre_temporal_checkpoint(model, state_dict, allow_init=False):
+    """Guard routing/loss semantics; allow explicit compatible initialization."""
+    module = getattr(model, "label_pre_temporal", None)
+    prefix = "label_pre_temporal."
+    present = any(name.startswith(prefix) for name in state_dict)
+    if module is None:
+        if present:
+            raise ValueError("Label-pre-temporal checkpoint requires LABEL_PRE_TEMPORAL.ENABLE.")
+        return False
+    if not present:
+        if allow_init:
+            logger.warning("Initializing Label-pre-temporal routing from legacy weights; resetting epoch/optimizer.")
+            model._label_pre_temporal_checkpoint_loaded = False
+            return True
+        raise ValueError("Label-pre-temporal weights missing: legacy initialization requires explicit CHECKPOINT_EPOCH_RESET=True.")
+    version_key = prefix + "architecture_version"
+    version = state_dict.get(version_key)
+    if version is None or version.numel() != 1:
+        raise ValueError("Label-pre-temporal checkpoint architecture mismatch.")
+    source, destination = version.item(), module.architecture_version.item()
+    reinitializing = source != destination
+    if reinitializing:
+        if source not in (1, 2, 3, 4, 5, 6, 7, 8) or destination not in (5, 6, 7, 8):
+            raise ValueError("Label-pre-temporal checkpoint architecture mismatch.")
+        if not allow_init:
+            raise ValueError(
+                "Label-pre-temporal attention/routing/readout/global classification semantics changed "
+                f"(v{source} -> v{destination}). Requires explicit "
+                "CHECKPOINT_EPOCH_RESET=True initialization, not resume/evaluation.")
+    expected = {name: value for name, value in model.named_parameters() if value.requires_grad}
+    expected.update({prefix + name: value for name, value in module.state_dict().items()})
+    missing = [name for name, value in expected.items()
+               if name not in state_dict or state_dict[name].shape != value.shape]
+    if missing:
+        raise ValueError("Incomplete Label-pre-temporal checkpoint: " + ", ".join(missing[:6]))
+    if reinitializing:
+        logger.warning("Initializing Label-pre-temporal v%s from v%s weights; routing, readout or "
+                       "classification semantics differ. Resetting epoch, optimizer and scaler.",
+                       destination, source)
+        # Do not overwrite the destination contract with the source marker.
+        # load_checkpoint validates before building its matching-state copy.
+        state_dict.pop(version_key)
+        model._label_pre_temporal_checkpoint_loaded = False
+        return True
+    model._label_pre_temporal_checkpoint_loaded = True
+    return False
+
+
 def validate_verifier_checkpoint(model, state_dict, allow_init=False):
     """Reject random/partial learned heads at evaluation or resume.
 
@@ -377,6 +425,7 @@ def load_checkpoint(
     replace_name_pattern=(),
     should_split_qkv=False,
     allow_verifier_init=False,
+    allow_label_pre_temporal_init=False,
 ):
     """
     Load the checkpoint from the given file. If inflation is True, inflate the
@@ -471,6 +520,8 @@ def load_checkpoint(
         diff = {d for d in diff if "num_batches_tracked" not in d}
         if len(diff) > 0:
             logger.warn("Not loaded {}".format(diff))
+        if validate_label_pre_temporal_checkpoint(ms, state_dict, allow_label_pre_temporal_init):
+            epoch_reset = True
         if validate_verifier_checkpoint(ms, state_dict, allow_verifier_init):
             epoch_reset = True
         ms.load_state_dict(state_dict, strict=False)
@@ -488,6 +539,8 @@ def load_checkpoint(
         if inflation:
             # Validate the source: inflate_weight can substitute initialized
             # model tensors for incompatible shapes, hiding an incomplete head.
+            if validate_label_pre_temporal_checkpoint(ms, checkpoint["model_state"], allow_label_pre_temporal_init):
+                epoch_reset = True
             if validate_verifier_checkpoint(ms, checkpoint["model_state"], allow_verifier_init):
                 epoch_reset = True
             # Try to inflate the model.
@@ -525,6 +578,8 @@ def load_checkpoint(
                     new_pre_train_dict[k] = v
                 pre_train_dict = new_pre_train_dict
 
+            if validate_label_pre_temporal_checkpoint(ms, pre_train_dict, allow_label_pre_temporal_init):
+                epoch_reset = True
             model_dict = ms.state_dict()
             # Match pre-trained weights that have same shape as current model.
             pre_train_dict_match = {
@@ -735,6 +790,7 @@ def load_test_checkpoint(cfg, model):
             "Unknown way of loading checkpoint. Using with random initialization, only for debugging."
         )
         unwrapped = model.module if hasattr(model, "module") else model
+        validate_label_pre_temporal_checkpoint(unwrapped, {})
         validate_verifier_checkpoint(unwrapped, {})
         epoch = -1
     return epoch
@@ -759,6 +815,7 @@ def load_train_checkpoint(cfg, model, optimizer, scaler=None):
             replace_name_pattern=cfg.TRAIN.CHECKPOINT_REPLACE_NAME_PATTERN,
             should_split_qkv = cfg.SPLIT_QKV_CHECKPOINT,
             allow_verifier_init=not cfg.TRAIN.VAL_ONLY,
+            allow_label_pre_temporal_init=(cfg.TRAIN.CHECKPOINT_EPOCH_RESET and not cfg.TRAIN.VAL_ONLY),
         )
         start_epoch = checkpoint_epoch + 1
     elif cfg.TRAIN.AUTO_RESUME and has_checkpoint(cfg.OUTPUT_DIR):
@@ -781,6 +838,9 @@ def load_train_checkpoint(cfg, model, optimizer, scaler=None):
 
     if cfg.TRAIN.VAL_ONLY:
         unwrapped = model.module if hasattr(model, "module") else model
+        if (getattr(unwrapped, "label_pre_temporal", None) is not None
+                and not getattr(unwrapped, "_label_pre_temporal_checkpoint_loaded", False)):
+            raise ValueError("VAL_ONLY requires a complete Label-pre-temporal checkpoint.")
         if (getattr(unwrapped, "query_evidence_verifier", None) is not None
                 and not getattr(unwrapped, "_verifier_checkpoint_loaded", False)):
             raise ValueError("VAL_ONLY requires a trained learned-verifier checkpoint.")

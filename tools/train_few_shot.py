@@ -30,6 +30,8 @@ from few_shot_multilabel import (
     q2s_cos_sim_fp32,
     support_query_split_multilabel,
     support_query_split_multilabel_conditioned,
+    unpack_episode_output,
+    single_path_episode_targets,
     update_ap_storage,
 )
 import trokens.models.losses as losses
@@ -342,16 +344,14 @@ def train_epoch(
             input_dict = {'video':inputs, 'metadata':meta}
 
             model_out = model(input_dict)
-            if isinstance(model_out, tuple) and len(model_out) == 3:
-                preds, patch_tokens, few_shot_aux = model_out
-            else:
-                preds, patch_tokens = model_out
-                few_shot_aux = None
+            preds, patch_tokens, few_shot_aux = unpack_episode_output(model_out)
+            single_path = isinstance(few_shot_aux, dict) and few_shot_aux.get("single_path_episode", False)
 
             if isinstance(preds, tuple):
                 preds, _ = preds
-            preds = preds / cfg.SOLVER.TEMPRATURE
-            preds = torch.nan_to_num(preds, nan=0.0, posinf=30.0, neginf=-30.0)
+            if preds is not None:
+                preds = preds / cfg.SOLVER.TEMPRATURE
+                preds = torch.nan_to_num(preds, nan=0.0, posinf=30.0, neginf=-30.0)
 
             # Explicitly declare reduction to mean.
             loss_fun = losses.get_loss_func(cfg)(
@@ -359,13 +359,25 @@ def train_epoch(
             )
 
             multilabel_episode = is_multilabel_episode(cfg, labels, meta)
-            if multilabel_episode:
+            if single_path:
+                if not multilabel_episode:
+                    raise ValueError("Single-path training requires multi-label episodes.")
+                if cfg.FEW_SHOT.CLASS_LOSS_LAMBDA > 0:
+                    if preds is None:
+                        raise ValueError("Global classification supervision requires classifier logits.")
+                    classfication_loss = multilabel_classification_loss(
+                        preds, labels, cfg, loss_fun)
+                else:
+                    classfication_loss = few_shot_aux["query_partial_q2s_logits"].new_zeros(())
+            elif multilabel_episode:
                 classfication_loss = multilabel_classification_loss(
                     preds, labels, cfg, loss_fun)
             else:
                 classfication_loss = loss_fun(preds, labels)
             loss_dict = {'classfication_loss':classfication_loss}
-            if multilabel_episode:
+            if single_path:
+                patch_support_query_dict = single_path_episode_targets(few_shot_aux, labels, meta)
+            elif multilabel_episode:
                 base_support_query_dict = support_query_split_multilabel(
                     patch_tokens, labels, meta)
                 if few_shot_aux_has_support_tokens(few_shot_aux):
@@ -418,10 +430,11 @@ def train_epoch(
 
         if not torch.isfinite(loss):
             finite_report = {
-                "preds": bool(torch.isfinite(preds).all()),
-                "patch_tokens": bool(torch.isfinite(patch_tokens).all()),
-                "support_preds": bool(torch.isfinite(patch_support_query_dict["support_preds"]).all()),
-                "query_preds": bool(torch.isfinite(patch_support_query_dict["query_preds"]).all()),
+                **{name: bool(torch.isfinite(value).all()) for name, value in {
+                    "preds": preds, "patch_tokens": patch_tokens,
+                    "support_preds": patch_support_query_dict.get("support_preds"),
+                    "query_preds": patch_support_query_dict.get("query_preds"),
+                }.items() if torch.is_tensor(value)},
                 "patch_q2s_logits": bool(torch.isfinite(patch_q2s_logits).all()),
                 "classification_loss": bool(torch.isfinite(classfication_loss)),
                 "q2s_loss": bool(torch.isfinite(q2s_loss)),
@@ -706,16 +719,15 @@ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, wandb_run=None):
         with autocast_context(cfg.TRAIN.MIXED_PRECISION):
             input_dict = {'video':inputs, 'metadata':meta}
             model_out = model(input_dict)
-            if isinstance(model_out, tuple) and len(model_out) == 3:
-                preds, patch_tokens, few_shot_aux = model_out
-            else:
-                preds, patch_tokens = model_out
-                few_shot_aux = None
+            preds, patch_tokens, few_shot_aux = unpack_episode_output(model_out)
+            single_path = isinstance(few_shot_aux, dict) and few_shot_aux.get("single_path_episode", False)
             if isinstance(preds, tuple):
                 preds, _ = preds
 
             multilabel_episode = is_multilabel_episode(cfg, labels, meta)
-            if multilabel_episode:
+            if single_path:
+                patch_support_query_dict = single_path_episode_targets(few_shot_aux, labels, meta)
+            elif multilabel_episode:
                 base_support_query_dict = support_query_split_multilabel(
                     patch_tokens, labels, meta)
                 if few_shot_aux_has_support_tokens(few_shot_aux):
@@ -816,7 +828,8 @@ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, wandb_run=None):
         # write to tensorboard format if available.
 
 
-        val_meter.update_predictions(preds, labels)
+        if preds is not None:
+            val_meter.update_predictions(preds, labels)
         if should_log_iter_stats(progress_bar):
             val_meter.log_iter_stats(cur_epoch, cur_iter)
         if progress_bar is not None:
