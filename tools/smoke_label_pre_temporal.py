@@ -149,11 +149,14 @@ def main():
     set_lr(optimizer, get_epoch_lr(0, cfg))
     dtype = getattr(torch, args.dtype)
     scaler = torch.cuda.amp.GradScaler(enabled=dtype == torch.float16)
-    required = ("label_pre_temporal.query.weight", "label_pre_temporal.key.weight",
-                "blocks.0.temporal_attn.qkv.weight", "blocks.0.attn.qkv.weight",
+    required = ("blocks.0.temporal_attn.qkv.weight", "blocks.0.attn.qkv.weight",
                 "hod_motion_module.fc2.c_fc.weight", "cross_motion_module.fc2.c_fc.weight",
                 "query_evidence_verifier.semantic_quality.projection.weight",
                 "query_evidence_verifier.metric_temperature_raw", "query_evidence_verifier.metric_scale_raw")
+    learned_routing = core.label_pre_temporal.scoring == "projected_cosine"
+    watched_parameter = "label_pre_temporal.query.weight" if learned_routing else required[0]
+    if learned_routing:
+        required += ("label_pre_temporal.query.weight", "label_pre_temporal.key.weight")
     if cfg.FEW_SHOT.CLASS_LOSS_LAMBDA > 0:
         required += ("head.weight", "head.bias")
     classification_loss_fn = get_loss_func(cfg)(reduction="mean")
@@ -210,14 +213,14 @@ def main():
             torch.nn.utils.clip_grad_value_(model.parameters(), cfg.SOLVER.CLIP_GRAD_VAL)
         elif cfg.SOLVER.CLIP_GRAD_L2NORM:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.SOLVER.CLIP_GRAD_L2NORM)
-        before = core.label_pre_temporal.query.weight.detach().clone()
+        before = parameters[watched_parameter].detach().clone()
         head_before = core.head.weight.detach().clone()
         scale_before = checked_amp_scale(scaler, cfg.SOLVER.AMP_MIN_SCALE)
         scaler.step(optimizer)
         scaler.update()
         scale_after = checked_amp_scale(scaler, cfg.SOLVER.AMP_MIN_SCALE)
         torch.cuda.synchronize()
-        updated = not torch.equal(before, core.label_pre_temporal.query.weight)
+        updated = not torch.equal(before, parameters[watched_parameter])
         head_updated = not torch.equal(head_before, core.head.weight)
         optimizer_skipped = scale_after < scale_before
         if optimizer_skipped:
@@ -225,7 +228,7 @@ def main():
             if updated or not bad or skipped > args.max_skipped_updates:
                 raise RuntimeError(f"AMP calibration failed after {skipped} skips: {bad}")
         elif bad or not updated:
-            raise RuntimeError("Routing optimizer update did not change its parameters.")
+            raise RuntimeError(f"Optimizer update did not change {watched_parameter}.")
         elif cfg.FEW_SHOT.CLASS_LOSS_LAMBDA > 0 and not head_updated:
             raise RuntimeError("Global classifier optimizer update did not change its parameters.")
         else:
@@ -242,6 +245,8 @@ def main():
             synthetic=not args.real_data, excludes_frozen_backbone=not args.real_data, includes_motion=True,
             rank=rank, world_size=world, grad_accum=args.grad_accum,
             routing_version=int(core.label_pre_temporal.architecture_version.item()),
+            routing_scoring=core.label_pre_temporal.scoring,
+            routing_parameters=sum(p.numel() for p in core.label_pre_temporal.parameters()),
             post_support_readout=core.label_pre_temporal.post_support_readout,
             temporal_bias_scale=core.label_pre_temporal.temporal_bias_scale,
             spatial_bias_scale=core.label_pre_temporal.spatial_bias_scale,
@@ -260,7 +265,8 @@ def main():
             forward_backward_seconds=sum(a.elapsed_time(b) for a, b in forward_backward_events) / 1000,
             peak_allocated_gib=torch.cuda.max_memory_allocated() / 1024 ** 3,
             peak_reserved_gib=torch.cuda.max_memory_reserved() / 1024 ** 3,
-            scaler_scale=scale_after, routing_updated=updated,
+            scaler_scale=scale_after, routing_updated=updated if learned_routing else None,
+            watched_parameter=watched_parameter, watched_parameter_updated=updated,
             optimizer_skipped=optimizer_skipped, nonfinite_gradients=bad,
             replicas_equal=True if world > 1 else None,
         )), flush=True)

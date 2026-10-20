@@ -1,0 +1,9 @@
+_BASE_: sav_label_pre_temporal_post_readout.yaml
+
+# v12 vs v8: remove only learned routing Q/K projections.
+# Direct cosine + masked patch softmax still conditions both temporal/spatial
+# attention BEFORE final readout; retain 256 trajectories and Post readout.
+OUTPUT_DIR: output/sav_label_pre_temporal_cosine_st_bias_cls
+FEW_SHOT:
+  LABEL_PRE_TEMPORAL:
+    SCORING: cosine

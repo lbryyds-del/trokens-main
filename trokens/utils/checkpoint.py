@@ -353,8 +353,15 @@ def validate_label_pre_temporal_checkpoint(model, state_dict, allow_init=False):
     source, destination = version.item(), module.architecture_version.item()
     reinitializing = source != destination
     if reinitializing:
-        if source not in (1, 2, 3, 4, 5, 6, 7, 8) or destination not in (5, 6, 7, 8):
+        if source not in range(1, 13) or destination not in range(5, 13):
             raise ValueError("Label-pre-temporal checkpoint architecture mismatch.")
+        if (source >= 9) != (destination >= 9):
+            # Deliberately no implicit Q/K addition/removal or optimizer
+            # migration. This experiment must be trained independently.
+            raise ValueError(
+                "Label-pre-temporal SCORING mismatch: projected_cosine and cosine "
+                "checkpoints cannot resume/evaluate or initialize each other. "
+                "Start a fresh run with the intended SCORING configuration.")
         if not allow_init:
             raise ValueError(
                 "Label-pre-temporal attention/routing/readout/global classification semantics changed "

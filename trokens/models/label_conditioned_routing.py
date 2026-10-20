@@ -22,6 +22,9 @@ from trokens.models.query_matching import normalize_patch_region_weights
 class LabelPreTemporalRouting(nn.Module):
     def __init__(self, dim, cfg, global_classifier=False):
         super().__init__()
+        self.scoring = str(cfg.SCORING)
+        if self.scoring not in ("projected_cosine", "cosine"):
+            raise ValueError("LABEL_PRE_TEMPORAL.SCORING must be projected_cosine or cosine.")
         self.temperature = float(cfg.ROUTE_TEMPERATURE)
         self.strength = float(cfg.GATE_STRENGTH)
         self.temporal_bias_scale = float(cfg.TEMPORAL_BIAS_SCALE)
@@ -43,31 +46,55 @@ class LabelPreTemporalRouting(nn.Module):
                 raise ValueError(f"{name} must be finite and non-negative.")
         if self.video_chunk_size <= 0 or self.class_chunk_size <= 0:
             raise ValueError("CLASS_CHUNK_SIZE and VIDEO_CHUNK_SIZE must be positive.")
-        self.query = nn.Linear(dim, dim, bias=False)
-        self.key = nn.Linear(dim, dim, bias=False)
-        nn.init.eye_(self.query.weight)
-        nn.init.eye_(self.key.weight)
+        if self.scoring == "projected_cosine":
+            self.query = nn.Linear(dim, dim, bias=False)
+            self.key = nn.Linear(dim, dim, bias=False)
+            nn.init.eye_(self.query.weight)
+            nn.init.eye_(self.key.weight)
+        else:
+            # No dormant/frozen matrices in the optimizer or checkpoint.
+            # This does NOT remove the original Transformer temporal/spatial QKV.
+            self.query = nn.Identity()
+            self.key = nn.Identity()
         # v5/v6 retain asymmetric conditions and replace v3/v4 Value gating
         # with temporal AND spatial logit bias, without/with global loss.
         # v7/v8 change only final Query readout to Post Support + text,
         # without/with global loss. Encoding conditions remain Raw-based.
-        # Old weights may initialize explicitly, never silently resume.
+        # v9-v12 are the corresponding original-space cosine scorers.
+        # Within a scorer family, changed semantics require explicit init;
+        # cross-scorer loading is rejected, never silently resume.
         self.register_buffer("architecture_version", torch.tensor(
-            (7 if self.post_support_readout else 5) + int(self.global_classifier),
+            (7 if self.post_support_readout else 5) + int(self.global_classifier)
+            + (4 if self.scoring == "cosine" else 0),
             dtype=torch.int64))
 
-    def forward(self, raw, labels, mask):
-        """Accept shared [K,D] or per-video [B,K,D] label conditions.
+    def routing_weights(self, raw, labels, mask):
+        """Patch-axis softmax for shared [K,D] or per-video [B,K,D] conditions.
 
         Only the small condition tensor varies by video role. Raw Keys are
-        projected once for the whole episode, not once per role or class.
+        projected (or normalized directly) once for the whole episode.
+        The cosine variant uses the legacy safe-normalization/clamped-cosine
+        formula, in FP32 even under AMP. Neither path aggregates trajectories.
         """
-        query = F.normalize(self.query(labels).float(), dim=-1, eps=1e-6)
-        keys = F.normalize(self.key(raw).float(), dim=-1, eps=1e-6)
+        if self.scoring == "projected_cosine":
+            # Preserve the v5-v8 projection precision and eps exactly.
+            query = F.normalize(self.query(labels).float(), dim=-1, eps=1e-6)
+            keys = F.normalize(self.key(raw).float(), dim=-1, eps=1e-6)
+        else:
+            query = F.normalize(torch.nan_to_num(labels.float(), nan=0., posinf=0., neginf=0.),
+                                dim=-1, eps=1e-12)
+            keys = F.normalize(torch.nan_to_num(raw.float(), nan=0., posinf=0., neginf=0.),
+                               dim=-1, eps=1e-12)
         with torch.autocast(device_type=raw.device.type, enabled=False):
             equation = "kd,btnd->bktn" if query.ndim == 2 else "bkd,btnd->bktn"
-            scores = torch.einsum(equation, query, keys) / self.temperature
-            weights = _masked_softmax(scores, mask[:, None])
+            scores = torch.einsum(equation, query, keys)
+            if self.scoring == "cosine":
+                scores = scores.clamp(-1., 1.)
+            return _masked_softmax(scores / self.temperature, mask[:, None])
+
+    def forward(self, raw, labels, mask):
+        weights = self.routing_weights(raw, labels, mask)
+        with torch.autocast(device_type=raw.device.type, enabled=False):
             count = mask.sum(-1, keepdim=True)[:, None]
             gate = 1 + self.strength * (count * weights - 1).tanh()
             # Invalid tokens are governed by the original attention mask, not

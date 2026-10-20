@@ -22,7 +22,7 @@ from tools.few_shot_multilabel import (
 
 
 def _new_model(quality=True, uniqueness=True, checkpoint=False, cls=True, classification=False,
-               post_readout=False):
+               post_readout=False, scoring="projected_cosine"):
     torch.manual_seed(71)
     model = _model(quality, uniqueness, checkpoint)
     model.cfg.FEW_SHOT.CLASS_LOSS_LAMBDA = 1. if classification else 0.
@@ -32,6 +32,7 @@ def _new_model(quality=True, uniqueness=True, checkpoint=False, cls=True, classi
     model.cfg.MODEL.ADAPOOLING.ENABLE = False
     model.cfg.MODEL.TRAIN_BACKBONE = False
     model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE = True
+    model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.SCORING = scoring
     model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ROUTE_TEMPERATURE = .4
     model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ACTIVATION_CHECKPOINT = checkpoint
     model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.POST_SUPPORT_READOUT = post_readout
@@ -421,9 +422,10 @@ def test_pointformer_forward_uses_raw_even_with_quality_off_and_skips_old_path()
 
 
 class _EpisodeHarness(nn.Module):
-    def __init__(self, classification=False, post_readout=False):
+    def __init__(self, classification=False, post_readout=False, scoring="projected_cosine"):
         super().__init__()
-        self.core = _new_model(checkpoint=True, classification=classification, post_readout=post_readout)
+        self.core = _new_model(checkpoint=True, classification=classification,
+                               post_readout=post_readout, scoring=scoring)
 
     def forward(self, inputs):
         features = inputs["video"]
@@ -431,11 +433,13 @@ class _EpisodeHarness(nn.Module):
 
 
 @pytest.mark.parametrize("classification", [False, True])
-def test_train_validation_and_test_entrypoints_without_legacy_outputs(tmp_path, monkeypatch, classification):
+@pytest.mark.parametrize("scoring", ["projected_cosine", "cosine"])
+def test_train_validation_and_test_entrypoints_without_legacy_outputs(tmp_path, monkeypatch, classification, scoring):
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "tools"))
     from tools import train_few_shot as train, test_few_shot as evaluate
     from trokens.utils.meters import TrainMeter, ValMeter
-    model = _EpisodeHarness(classification=classification)
+    model = _EpisodeHarness(classification=classification, scoring=scoring,
+                             post_readout=scoring == "cosine")
     cfg = model.core.cfg
     cfg.NUM_GPUS = 0
     cfg.TRAIN.MIXED_PRECISION = False
@@ -458,11 +462,13 @@ def test_train_validation_and_test_entrypoints_without_legacy_outputs(tmp_path, 
     if not classification:
         monkeypatch.setattr(train, "multilabel_classification_loss", forbidden)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    before = model.core.label_pre_temporal.query.weight.detach().clone()
+    watched = (model.core.label_pre_temporal.query.weight if scoring == "projected_cosine"
+               else model.core.blocks[0].temporal_attn.qkv.weight)
+    before = watched.detach().clone()
     head_before = model.core.head.weight.detach().clone()
     train.train_epoch(batch, model, optimizer, train.make_grad_scaler(False),
                       TrainMeter(1, cfg), 0, cfg)
-    assert not torch.equal(before, model.core.label_pre_temporal.query.weight)
+    assert not torch.equal(before, watched)
     assert (not torch.equal(head_before, model.core.head.weight)) == classification
     score = train.eval_epoch(batch, model, ValMeter(1, cfg), 0, cfg)
     assert 0 <= score <= 100
@@ -504,7 +510,7 @@ def test_cuda_amp_checkpoint_forward_backward_and_optimizer(dtype, checkpoint, c
 
 def _single_path_ddp_worker(rank, rendezvous, cuda=False, class_chunk=1, checkpoint=True,
                             mlp_checkpoint=False, readout_checkpoint=False, classification=False,
-                            post_readout=False):
+                            post_readout=False, scoring="projected_cosine"):
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel
     torch.set_num_threads(1)
@@ -515,7 +521,7 @@ def _single_path_ddp_worker(rank, rendezvous, cuda=False, class_chunk=1, checkpo
                             world_size=2, timeout=timedelta(seconds=45))
     try:
         model = DistributedDataParallel(_EpisodeHarness(classification=classification,
-                                                        post_readout=post_readout).to(device),
+                                                        post_readout=post_readout, scoring=scoring).to(device),
                                         device_ids=[rank] if cuda else None,
                                         find_unused_parameters=True)
         model.module.core.label_pre_temporal.class_chunk_size = class_chunk

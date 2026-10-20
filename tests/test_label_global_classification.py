@@ -19,7 +19,8 @@ from trokens.config.defaults import get_cfg
 @pytest.mark.parametrize("config_name", ["sav_label_pre_temporal.yaml",
                                        "sav_label_pre_temporal_parallel.yaml",
                                        "sav_label_pre_temporal_fast.yaml",
-                                       "sav_label_pre_temporal_post_readout.yaml"])
+                                       "sav_label_pre_temporal_post_readout.yaml",
+                                       "sav_label_pre_temporal_cosine.yaml"])
 def test_total_objective_and_gradients_equal_legacy_five_term_loss(config_name):
     """Independent formula oracle: same predictions/targets => same old loss."""
     cfg = get_cfg()

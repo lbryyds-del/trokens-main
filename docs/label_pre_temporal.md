@@ -7,6 +7,10 @@
 旧 SVG/PNG 流程图已移出仓库，临时备份位于 `/tmp/trokens-value-gate-diagrams.RCkqsg/`。
 已有训练输出和 checkpoint 未删除。
 
+新增独立的 [前置直接余弦权重对照（v12）](label_cosine_pre_temporal.md)：
+保留 v8 的前置时间/空间偏置与 Post Support 最终读出，只移除路由 Wq/Wk 投影。
+使用 `sav_label_pre_temporal_cosine.yaml`；原有配置仍使用可学习投影，不受影响。
+
 ## 本次单项对照：Post Support 条件读出（v8）
 
 新配置 `configs/trokens/sav_label_pre_temporal_post_readout.yaml` 继承 fast，

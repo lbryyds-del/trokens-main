@@ -33,6 +33,9 @@ def add_custom_config(cfg):
     # Opt-in single-path Label -> Patch priors inside serial temporal/spatial attention.
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL = CfgNode()
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE = False
+    # projected_cosine: learned label/Raw projections (v5-v8 control).
+    # cosine: original-space cosine, no learned routing Q/K (v9-v12).
+    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.SCORING = "projected_cosine"
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ROUTE_TEMPERATURE = 0.04
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.GATE_STRENGTH = 0.25
     # Fixed lambda in softmax(QK/sqrt(d) + lambda * log(g + eps)); zero ablates
