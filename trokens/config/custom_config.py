@@ -75,7 +75,11 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY = CfgNode()
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE = False
     verifier = CfgNode()
+    # Preserve v3 for old configs; SAV opts into the direct learned decision.
+    verifier.QUALITY_MODE = "semantic_relation"
     verifier.QUALITY_HIDDEN_DIM = 64
+    verifier.QUALITY_DECISION_LOCAL_DIM = 32
+    verifier.QUALITY_DECISION_READOUT_DIM = 16
     verifier.QUALITY_PATCH_TEMPERATURE = 0.07
     verifier.QUALITY_REFERENCE_TEMPERATURE = 0.10
     verifier.QUALITY_MAX_POOL_DELTA = 0.5

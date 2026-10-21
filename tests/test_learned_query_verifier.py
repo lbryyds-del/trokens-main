@@ -25,7 +25,7 @@ def _cfg():
     return cfg
 
 
-def _model(quality=True, uniqueness=True, checkpoint=False):
+def _model(quality=True, uniqueness=True, checkpoint=False, quality_mode="semantic_relation"):
     model = Pointformer.__new__(Pointformer)
     nn.Module.__init__(model)
     model.cfg = _cfg()
@@ -33,6 +33,7 @@ def _model(quality=True, uniqueness=True, checkpoint=False):
     cfg.QUALITY_ENABLE = quality
     cfg.UNIQUENESS_ENABLE = uniqueness
     vc = cfg.LEARNED_VERIFIER
+    vc.QUALITY_MODE = quality_mode
     vc.QUALITY_HIDDEN_DIM = 8
     vc.QUERY_CHUNK_SIZE = 1
     vc.ACTIVATION_CHECKPOINT = checkpoint
@@ -260,7 +261,7 @@ def test_independent_switches_and_tinyvirat_uses_current_verifier():
     tiny.merge_from_file(str(Path(__file__).resolve().parents[1] / "configs/trokens/tinyvirat.yaml"))
     assert tiny.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE
     vc = tiny.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER
-    assert "QUALITY_MODE" not in vc and "UNIQUENESS_MODE" not in vc
+    assert vc.QUALITY_MODE == "semantic_relation" and "UNIQUENESS_MODE" not in vc
 
 
 def test_verified_loss_trains_heads_and_matcher_without_raw_feedback():

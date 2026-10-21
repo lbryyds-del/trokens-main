@@ -22,9 +22,9 @@ from tools.few_shot_multilabel import (
 
 
 def _new_model(quality=True, uniqueness=True, checkpoint=False, cls=True, classification=False,
-               post_readout=False, scoring="projected_cosine"):
+               post_readout=False, scoring="projected_cosine", quality_mode="semantic_relation"):
     torch.manual_seed(71)
-    model = _model(quality, uniqueness, checkpoint)
+    model = _model(quality, uniqueness, checkpoint, quality_mode=quality_mode)
     model.cfg.FEW_SHOT.CLASS_LOSS_LAMBDA = 1. if classification else 0.
     model.cfg.TEST.SEEN_LABELS = [0, 1]
     model.cfg.MODEL.USE_CLS_TOKEN = cls
@@ -422,10 +422,11 @@ def test_pointformer_forward_uses_raw_even_with_quality_off_and_skips_old_path()
 
 
 class _EpisodeHarness(nn.Module):
-    def __init__(self, classification=False, post_readout=False, scoring="projected_cosine"):
+    def __init__(self, classification=False, post_readout=False, scoring="projected_cosine",
+                 quality_mode="semantic_relation"):
         super().__init__()
         self.core = _new_model(checkpoint=True, classification=classification,
-                               post_readout=post_readout, scoring=scoring)
+                               post_readout=post_readout, scoring=scoring, quality_mode=quality_mode)
 
     def forward(self, inputs):
         features = inputs["video"]
@@ -510,7 +511,7 @@ def test_cuda_amp_checkpoint_forward_backward_and_optimizer(dtype, checkpoint, c
 
 def _single_path_ddp_worker(rank, rendezvous, cuda=False, class_chunk=1, checkpoint=True,
                             mlp_checkpoint=False, readout_checkpoint=False, classification=False,
-                            post_readout=False, scoring="projected_cosine"):
+                            post_readout=False, scoring="projected_cosine", quality_mode="semantic_relation"):
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel
     torch.set_num_threads(1)
@@ -521,7 +522,8 @@ def _single_path_ddp_worker(rank, rendezvous, cuda=False, class_chunk=1, checkpo
                             world_size=2, timeout=timedelta(seconds=45))
     try:
         model = DistributedDataParallel(_EpisodeHarness(classification=classification,
-                                                        post_readout=post_readout, scoring=scoring).to(device),
+                                                        post_readout=post_readout, scoring=scoring,
+                                                        quality_mode=quality_mode).to(device),
                                         device_ids=[rank] if cuda else None,
                                         find_unused_parameters=True)
         model.module.core.label_pre_temporal.class_chunk_size = class_chunk

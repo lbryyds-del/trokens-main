@@ -401,7 +401,8 @@ def validate_verifier_checkpoint(model, state_dict, allow_init=False):
         version = state_dict[version_key]
         if version.numel() != 1 or version.item() != verifier.architecture_version.item():
             raise ValueError(
-                "Checkpoint evidence architecture does not match the configured quality/uniqueness heads. "
+                "Checkpoint evidence architecture version does not match the configured quality/uniqueness heads. "
+                "semantic_relation + metric is v3; relation_decision + metric is v5. "
                 "Changing heads requires a new training run; incompatible weights cannot be resumed or evaluated."
             )
     expected = {prefix + name: value for name, value in verifier.state_dict().items()}

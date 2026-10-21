@@ -18,8 +18,8 @@ def _verifier():
 def test_config_and_no_old_quality_classifier_or_class_specific_parameters():
     cfg = _cfg()
     vc = cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER
-    assert "QUALITY_MODE" not in vc and "UNIQUENESS_MODE" not in vc
-    assert cfg.OUTPUT_DIR == "output/sav"
+    assert vc.QUALITY_MODE == "relation_decision" and "UNIQUENESS_MODE" not in vc
+    assert cfg.OUTPUT_DIR == "output/sav_relation_decision"
     assert not cfg.TRAIN.AUTO_RESUME and cfg.TRAIN.CHECKPOINT_FILE_PATH == ""
     verifier = _verifier()
     assert verifier.architecture_version.item() == 3
@@ -206,6 +206,7 @@ def test_incompatible_evidence_checkpoint_is_rejected(tmp_path, old_version, all
 ])
 def test_invalid_quality_config_fails_early(field, value):
     cfg = _cfg().FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER
+    cfg.QUALITY_MODE = "semantic_relation"
     setattr(cfg, field, value)
     with pytest.raises(ValueError, match=field):
         QueryEvidenceVerifier(4, cfg)

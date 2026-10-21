@@ -1,6 +1,6 @@
 TASK: few_shot
 NUM_GPUS: 1
-OUTPUT_DIR: output/sav
+OUTPUT_DIR: output/sav_relation_decision
 
 FEW_SHOT:
   N_WAY: 5
@@ -23,12 +23,17 @@ FEW_SHOT:
   QUERY_CLASS_MATCHABILITY:
     ENABLE: True
     LEARNED_VERIFIER:
-      # Raw semantic quality with a bounded Support relation correction.
+      # Same Raw/text/Support reader; direct learned quality decision (v5).
+      # semantic_relation restores the old v3 head for controlled comparisons.
+      QUALITY_MODE: relation_decision
       QUALITY_HIDDEN_DIM: 64
+      QUALITY_DECISION_LOCAL_DIM: 32
+      QUALITY_DECISION_READOUT_DIM: 16
       QUALITY_PATCH_TEMPERATURE: 0.07
       QUALITY_REFERENCE_TEMPERATURE: 0.10
       QUALITY_MAX_POOL_DELTA: 0.5
       QUALITY_MAX_REFERENCE_DELTA: 0.5
+      # Used only by semantic_relation, ignored by relation_decision.
       QUALITY_MAX_EVIDENCE_DELTA: 0.10
       QUALITY_SCALE_INIT: 10.0
       QUALITY_BIAS_INIT: 0.0

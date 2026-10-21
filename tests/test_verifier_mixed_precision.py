@@ -12,22 +12,23 @@ def test_sav_fast_defaults_and_conservative_global_defaults():
     from trokens.config.defaults import get_cfg
     cfg = _cfg().FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER
     assert (cfg.QUERY_CHUNK_SIZE, cfg.ACTIVATION_CHECKPOINT, cfg.AMP_ENABLE) == (16, False, True)
-    assert "QUALITY_MODE" not in cfg and "UNIQUENESS_MODE" not in cfg
+    assert cfg.QUALITY_MODE == "relation_decision" and "UNIQUENESS_MODE" not in cfg
     defaults = get_cfg().FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER
     assert (defaults.QUERY_CHUNK_SIZE, defaults.ACTIVATION_CHECKPOINT, defaults.AMP_ENABLE) == (4, True, False)
-    assert "QUALITY_MODE" not in defaults and "UNIQUENESS_MODE" not in defaults
+    assert defaults.QUALITY_MODE == "semantic_relation" and "UNIQUENESS_MODE" not in defaults
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("checkpoint", [False, True])
 @pytest.mark.parametrize("detach", [False, True])
 @pytest.mark.parametrize("mask_case", ["partial", "empty", "no_confuser"])
-def test_amp_outputs_masks_gradients_and_grad_scaler(checkpoint, detach, mask_case):
+@pytest.mark.parametrize("quality_mode", ["semantic_relation", "relation_decision"])
+def test_amp_outputs_masks_gradients_and_grad_scaler(checkpoint, detach, mask_case, quality_mode):
     torch.manual_seed(228)
-    baseline = _model(checkpoint=True).cuda().query_evidence_verifier
+    baseline = _model(checkpoint=True, quality_mode=quality_mode).cuda().query_evidence_verifier
     baseline.amp_enabled = False
     baseline.chunk_size = 4
-    actual = _model(checkpoint=checkpoint).cuda().query_evidence_verifier
+    actual = _model(checkpoint=checkpoint, quality_mode=quality_mode).cuda().query_evidence_verifier
     actual.amp_enabled = True
     actual.chunk_size = 16
     baseline.detach_inputs = actual.detach_inputs = detach
@@ -91,8 +92,9 @@ def test_amp_outputs_masks_gradients_and_grad_scaler(checkpoint, detach, mask_ca
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("amp,outer_amp", [(True, True), (False, True), (True, False)])
-def test_amp_linear_attention_and_fp32_normalization_boundaries(amp, outer_amp):
-    verifier = _model().cuda().query_evidence_verifier
+@pytest.mark.parametrize("quality_mode", ["semantic_relation", "relation_decision"])
+def test_amp_linear_attention_and_fp32_normalization_boundaries(amp, outer_amp, quality_mode):
+    verifier = _model(quality_mode=quality_mode).cuda().query_evidence_verifier
     verifier.amp_enabled = amp
     observed, hooks = {}, []
     for name, module in verifier.named_modules():
@@ -113,8 +115,9 @@ def test_amp_linear_attention_and_fp32_normalization_boundaries(amp, outer_amp):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_amp_invalid_nonfinite_inputs_are_sanitized_before_projection():
-    verifier = _model().cuda().query_evidence_verifier
+@pytest.mark.parametrize("quality_mode", ["semantic_relation", "relation_decision"])
+def test_amp_invalid_nonfinite_inputs_are_sanitized_before_projection(quality_mode):
+    verifier = _model(quality_mode=quality_mode).cuda().query_evidence_verifier
     inputs = _direct_inputs("cuda")
     with torch.no_grad():
         inputs["raw_query"][0, 0, 0, 0] = float("nan")

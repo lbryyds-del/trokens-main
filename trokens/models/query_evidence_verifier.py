@@ -115,8 +115,9 @@ class SemanticRelationQuality(nn.Module):
         references = references.flatten(1, 2)
         return references, self.projection(references), reference_text
 
-    def _chunk(self, raw, projected, text, projected_text, valid,
-               references, projected_references, reference_text, reference_mask):
+    def _relation_inputs(self, raw, projected, text, projected_text, valid,
+                         references, projected_references, reference_text, reference_mask):
+        """Shared v3 evidence reading, before either quality decision rule."""
         weights, evidence, pool_delta = self._pool(raw, projected, text, projected_text, valid)
         # Original Raw geometry determines both the absolute evidence and the
         # reference-read anchor. Only low-dimensional relation GEMMs use AMP.
@@ -146,6 +147,13 @@ class SemanticRelationQuality(nn.Module):
             (x - e).expand_as(pos), x - pos, x - neg, x * pos, x * neg,
             torch.stack((evidence, pc, nc, pt, nt), dim=-1),
         ), dim=-1)
+        return weights, evidence, pool_delta, relation
+
+    def _chunk(self, raw, projected, text, projected_text, valid,
+               references, projected_references, reference_text, reference_mask):
+        weights, evidence, pool_delta, relation = self._relation_inputs(
+            raw, projected, text, projected_text, valid,
+            references, projected_references, reference_text, reference_mask)
         residual = self.relation(relation).squeeze(-1).float().tanh()
         anchor = (weights * evidence).sum(-1)
         correction = self.relation_strength * self.max_evidence_delta * (weights * residual).sum(-1)
@@ -180,11 +188,95 @@ class SemanticRelationQuality(nn.Module):
                     quality_correction_saturation=saturation, quality_pool_shift=pool_shift)
 
 
+class RelationDecisionQuality(SemanticRelationQuality):
+    """V3 evidence reader with a directly learned visual-relation decision.
+
+    Inherit the reader operations, NOT the v3 residual/scale parameters. Raw
+    cosine remains a feature and retrieval prior, never a mandatory logit term.
+    This is frame-level acceptance, not patch supervision/prototype rewriting.
+    """
+
+    def __init__(self, input_dim, cfg):
+        nn.Module.__init__(self)
+        d = int(getattr(cfg, "QUALITY_HIDDEN_DIM", 64))
+        local = int(getattr(cfg, "QUALITY_DECISION_LOCAL_DIM", 32))
+        readout = int(getattr(cfg, "QUALITY_DECISION_READOUT_DIM", 16))
+        for name, value in (("QUALITY_HIDDEN_DIM", d),
+                            ("QUALITY_DECISION_LOCAL_DIM", local),
+                            ("QUALITY_DECISION_READOUT_DIM", readout)):
+            if value <= 0:
+                raise ValueError(f"{name} must be positive.")
+        self.dim = d
+        for attr, field, default, positive in (
+            ("patch_temperature", "QUALITY_PATCH_TEMPERATURE", .07, True),
+            ("reference_temperature", "QUALITY_REFERENCE_TEMPERATURE", .10, True),
+            ("max_pool_delta", "QUALITY_MAX_POOL_DELTA", .5, False),
+            ("max_reference_delta", "QUALITY_MAX_REFERENCE_DELTA", .5, False),
+        ):
+            value = float(getattr(cfg, field, default))
+            if not math.isfinite(value) or (value <= 0 if positive else value < 0):
+                raise ValueError(f"{field} must be finite and {'positive' if positive else 'non-negative'}.")
+            self.register_buffer(attr, torch.tensor(value, dtype=torch.float32))
+        self.projection = nn.Linear(input_dim, d, bias=False)
+        self.pool = nn.Sequential(
+            FP32LayerNorm(2 * d + 1), nn.Linear(2 * d + 1, d), nn.GELU(), nn.Linear(d, 1),
+        )
+        self.relation_encoder = nn.Sequential(
+            FP32LayerNorm(5 * d + 5), nn.Linear(5 * d + 5, 2 * d), nn.GELU(),
+            nn.Linear(2 * d, local), nn.GELU(),
+        )
+        self.decision = nn.Sequential(nn.Linear(local, readout), nn.GELU(), nn.Linear(readout, 1))
+        for head in (self.pool[-1], self.decision[-1]):
+            nn.init.normal_(head.weight, std=.01)
+            nn.init.zeros_(head.bias)
+
+    def _chunk(self, raw, projected, text, projected_text, valid,
+               references, projected_references, reference_text, reference_mask):
+        weights, evidence, pool_delta, relation = self._relation_inputs(
+            raw, projected, text, projected_text, valid,
+            references, projected_references, reference_text, reference_mask)
+        local = self.relation_encoder(relation)
+        with torch.autocast(device_type=raw.device.type, enabled=False):
+            pooled = (weights.unsqueeze(-1) * local.float()).sum(-2)
+            semantic_evidence = (weights * evidence).sum(-1)
+            pool_shift = (weights * pool_delta.abs()).sum(-1)
+            feature_norm = pooled.norm(dim=-1)
+        logits = self.decision(pooled).squeeze(-1).float()
+        return tuple(value.transpose(0, 1) for value in
+                     (logits, weights, semantic_evidence, pool_shift, feature_norm))
+
+    def forward(self, raw_query, raw_support, text, query_valid, support_valid,
+                positive, negative, call, chunk_size):
+        qr, sr, et = (self.projection(x) for x in (raw_query, raw_support, text))
+        references = call(self._references, raw_support, sr, text, et, support_valid)
+        support_frames = support_valid.any(-1)[None]
+        mask = torch.stack(((support_frames & positive.T[:, :, None]).flatten(1),
+                            (support_frames & negative.T[:, :, None]).flatten(1)), dim=1)
+        available = mask.any(-1).all(-1)
+        parts = []
+        for start in range(0, raw_query.shape[0], chunk_size):
+            sl = slice(start, start + chunk_size)
+            parts.append(call(self._chunk, raw_query[sl], qr[sl], text, et, query_valid[sl], *references, mask))
+        logits, weights, evidence, pool_shift, feature_norm = (
+            torch.cat(values) for values in zip(*parts))
+        frame_valid = query_valid.any(-1)[:, None]
+        valid = frame_valid & available[None, :, None]
+        mass = torch.where(available[None, :, None], logits.sigmoid(), torch.ones_like(logits))
+        mass = torch.where(frame_valid, mass, torch.zeros_like(mass))
+        return dict(quality=mass, quality_logits=logits, quality_valid=valid,
+                    quality_weights=weights, quality_reference_available=available,
+                    quality_semantic_evidence=evidence, quality_pool_shift=pool_shift,
+                    quality_relation_feature_norm=feature_norm)
+
+
 class QueryEvidenceVerifier(nn.Module):
     def __init__(self, input_dim, cfg, quality=True, uniqueness=True):
         super().__init__()
         self.quality = quality
         self.uniqueness = uniqueness
+        self.quality_mode = str(getattr(cfg, "QUALITY_MODE", "semantic_relation"))
+        if self.quality_mode not in ("semantic_relation", "relation_decision"):
+            raise ValueError("QUALITY_MODE must be semantic_relation or relation_decision.")
         self.detach_inputs = bool(getattr(cfg, "DETACH_INPUTS", True))
         self.chunk_size = int(getattr(cfg, "QUERY_CHUNK_SIZE", 4))
         if self.chunk_size <= 0:
@@ -198,9 +290,11 @@ class QueryEvidenceVerifier(nn.Module):
             raise ValueError("TRANSPORT_WARMUP_FRACTION must be in [0,1].")
         self.transport_progress = 1.0
         # Preserve trained checkpoint identifiers, including quality ablation.
-        self.register_buffer("architecture_version", torch.tensor(3 if quality else 2, dtype=torch.int64))
+        version = (5 if self.quality_mode == "relation_decision" else 3) if quality else 2
+        self.register_buffer("architecture_version", torch.tensor(version, dtype=torch.int64))
         if quality:
-            self.semantic_quality = SemanticRelationQuality(input_dim, cfg)
+            quality_head = RelationDecisionQuality if self.quality_mode == "relation_decision" else SemanticRelationQuality
+            self.semantic_quality = quality_head(input_dim, cfg)
         if uniqueness:
             # Only aggregation/calibration are learned. Never rotate/compress
             # the Post metric space or add a feature-only classifier shortcut.
@@ -531,17 +625,21 @@ def finish_query_evidence_aux(model, result, query_prototypes, support_prototype
                 1 / quality_weights.square().sum(-1).clamp_min(1e-6), frame_valid),
             "query_quality_top1_mass_mean": _frame_mean(quality_weights.max(-1).values, frame_valid),
         })
-        for name in ("anchor", "correction", "correction_saturation", "pool_shift"):
+        names = (("anchor", "correction", "correction_saturation", "pool_shift")
+                 if verifier.quality_mode == "semantic_relation"
+                 else ("semantic_evidence", "pool_shift", "relation_feature_norm"))
+        for name in names:
             value = outputs["quality_" + name]
             result["query_quality_" + name] = value
             result["query_quality_" + name + "_mean"] = _frame_mean(value, outputs["quality_valid"])
-        result["query_quality_correction_abs_mean"] = _frame_mean(
-            outputs["quality_correction"].abs(), outputs["quality_valid"])
-        head = verifier.semantic_quality
-        result.update(query_quality_scale=F.softplus(head.scale_raw.detach().float()) + 1e-4,
-                      query_quality_bias=head.bias.detach().float(),
-                      query_quality_relation_strength=mass.new_tensor(head.relation_strength),
-                      query_quality_max_evidence_delta=head.max_evidence_delta.detach().float())
+        if verifier.quality_mode == "semantic_relation":
+            result["query_quality_correction_abs_mean"] = _frame_mean(
+                outputs["quality_correction"].abs(), outputs["quality_valid"])
+            head = verifier.semantic_quality
+            result.update(query_quality_scale=F.softplus(head.scale_raw.detach().float()) + 1e-4,
+                          query_quality_bias=head.bias.detach().float(),
+                          query_quality_relation_strength=mass.new_tensor(head.relation_strength),
+                          query_quality_max_evidence_delta=head.max_evidence_delta.detach().float())
     if judgments.uniqueness:
         result.update({
             "query_frame_matchability": rho,

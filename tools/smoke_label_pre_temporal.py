@@ -154,6 +154,8 @@ def main():
                 "query_evidence_verifier.semantic_quality.projection.weight",
                 "query_evidence_verifier.metric_temperature_raw", "query_evidence_verifier.metric_scale_raw")
     learned_routing = core.label_pre_temporal.scoring == "projected_cosine"
+    required += tuple("query_evidence_verifier.semantic_quality." + name
+                      for name, _ in core.query_evidence_verifier.semantic_quality.named_parameters())
     watched_parameter = "label_pre_temporal.query.weight" if learned_routing else required[0]
     if learned_routing:
         required += ("label_pre_temporal.query.weight", "label_pre_temporal.key.weight")
@@ -257,6 +259,8 @@ def main():
             mlp_checkpoint=core.blocks[0].checkpoint_mlp,
             readout_checkpoint=core.label_pre_temporal.readout_checkpoint,
             verifier_checkpoint=core.query_evidence_verifier.activation_checkpoint,
+            quality_mode=core.query_evidence_verifier.quality_mode,
+            verifier_version=int(core.query_evidence_verifier.architecture_version.item()),
             transport_progress=core.query_evidence_verifier.transport_progress,
             lr=optimizer.param_groups[0]["lr"],
             shape=[b, k, t, n, d], step=step, attempt=attempt, dtype=args.dtype,

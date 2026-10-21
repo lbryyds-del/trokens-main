@@ -1,8 +1,8 @@
 _BASE_: sav.yaml
 
-# Single-path experiment. Original sav.yaml stays unchanged for comparison.
+# Single-path experiment; quality selection is inherited from sav.yaml.
 # v6: asymmetric conditions, serial temporal + spatial attention-logit bias.
-OUTPUT_DIR: output/sav_label_pre_temporal_st_bias_cls
+OUTPUT_DIR: output/sav_label_pre_temporal_relation_decision_st_bias_cls
 FEW_SHOT:
   # Restore the original global classification supervision using the existing
   # conditional encodings; no extra neutral encoder pass.

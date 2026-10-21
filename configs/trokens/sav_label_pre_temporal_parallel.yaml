@@ -1,7 +1,7 @@
 _BASE_: sav_label_pre_temporal.yaml
 
 # Same model/weights/losses, batched class execution. Existing runs are unchanged.
-OUTPUT_DIR: output/sav_label_pre_temporal_parallel_st_bias_cls
+OUTPUT_DIR: output/sav_label_pre_temporal_parallel_relation_decision_st_bias_cls
 FEW_SHOT:
   LABEL_PRE_TEMPORAL:
     CLASS_CHUNK_SIZE: 5
