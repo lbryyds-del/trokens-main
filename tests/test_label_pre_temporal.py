@@ -22,7 +22,7 @@ from tools.few_shot_multilabel import (
 
 
 def _new_model(quality=True, uniqueness=True, checkpoint=False, cls=True, classification=False,
-               post_readout=False, scoring="projected_cosine", quality_mode="semantic_relation"):
+               scoring="projected_cosine", quality_mode="semantic_relation"):
     torch.manual_seed(71)
     model = _model(quality, uniqueness, checkpoint, quality_mode=quality_mode)
     model.cfg.FEW_SHOT.CLASS_LOSS_LAMBDA = 1. if classification else 0.
@@ -35,7 +35,12 @@ def _new_model(quality=True, uniqueness=True, checkpoint=False, cls=True, classi
     model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.SCORING = scoring
     model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ROUTE_TEMPERATURE = .4
     model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ACTIVATION_CHECKPOINT = checkpoint
-    model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.POST_SUPPORT_READOUT = post_readout
+    # Keep the serial test oracle independent of the active SAV execution profile.
+    model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.CLASS_CHUNK_SIZE = 1
+    model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.VIDEO_CHUNK_SIZE = 4
+    model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.BATCH_RAW_QUALITY = False
+    model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.MLP_CHECKPOINT = False
+    model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.READOUT_CHECKPOINT = False
     model.depth = 1
     model.point_grid_size = 1
     model.temporal_resolution = 3
@@ -422,11 +427,11 @@ def test_pointformer_forward_uses_raw_even_with_quality_off_and_skips_old_path()
 
 
 class _EpisodeHarness(nn.Module):
-    def __init__(self, classification=False, post_readout=False, scoring="projected_cosine",
+    def __init__(self, classification=False, scoring="projected_cosine",
                  quality_mode="semantic_relation"):
         super().__init__()
         self.core = _new_model(checkpoint=True, classification=classification,
-                               post_readout=post_readout, scoring=scoring, quality_mode=quality_mode)
+                               scoring=scoring, quality_mode=quality_mode)
 
     def forward(self, inputs):
         features = inputs["video"]
@@ -439,8 +444,7 @@ def test_train_validation_and_test_entrypoints_without_legacy_outputs(tmp_path, 
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "tools"))
     from tools import train_few_shot as train, test_few_shot as evaluate
     from trokens.utils.meters import TrainMeter, ValMeter
-    model = _EpisodeHarness(classification=classification, scoring=scoring,
-                             post_readout=scoring == "cosine")
+    model = _EpisodeHarness(classification=classification, scoring=scoring)
     cfg = model.core.cfg
     cfg.NUM_GPUS = 0
     cfg.TRAIN.MIXED_PRECISION = False
@@ -511,7 +515,7 @@ def test_cuda_amp_checkpoint_forward_backward_and_optimizer(dtype, checkpoint, c
 
 def _single_path_ddp_worker(rank, rendezvous, cuda=False, class_chunk=1, checkpoint=True,
                             mlp_checkpoint=False, readout_checkpoint=False, classification=False,
-                            post_readout=False, scoring="projected_cosine", quality_mode="semantic_relation"):
+                            scoring="projected_cosine", quality_mode="semantic_relation"):
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel
     torch.set_num_threads(1)
@@ -522,7 +526,7 @@ def _single_path_ddp_worker(rank, rendezvous, cuda=False, class_chunk=1, checkpo
                             world_size=2, timeout=timedelta(seconds=45))
     try:
         model = DistributedDataParallel(_EpisodeHarness(classification=classification,
-                                                        post_readout=post_readout, scoring=scoring,
+                                                        scoring=scoring,
                                                         quality_mode=quality_mode).to(device),
                                         device_ids=[rank] if cuda else None,
                                         find_unused_parameters=True)

@@ -15,7 +15,7 @@ from trokens.utils.checkpoint import validate_label_pre_temporal_checkpoint
 def _capture_conditions(model, features, raw, meta):
     calls = []
     hook = model.label_pre_temporal.register_forward_hook(
-        lambda module, args, output: calls.append((args[1].detach().clone(), output.detach().clone())))
+        lambda module, args, output: calls.append((args[1].detach().clone(), output[0].detach().clone())))
     try:
         output = label_conditioned_episode(model, features, raw, meta)
     finally:
@@ -44,7 +44,7 @@ def test_episode_role_conditions_and_final_post_matching_oracle(interleaved):
     assert not torch.allclose(expected_query, text)
 
     # Independent serial path: encode every trajectory with pure-text gates,
-    # then text-read Post frames, then average known-positive Support videos.
+    # then reuse early weights on Post, then average known-positive Supports.
     mask = meta["pred_query_mask"][support]
     tokens, token_mask, state = _prepare(model, features[support], mask)
     expected_gates = model.label_pre_temporal(raw[support], text, mask)
@@ -53,8 +53,8 @@ def test_episode_role_conditions_and_final_post_matching_oracle(interleaved):
     for c in range(text.shape[0]):
         encoded = _encode(model, tokens, token_mask, state, expected_gates[:, c])
         assert encoded.shape == features[support].shape  # No trajectory compression.
-        frames = model._compute_batched_frame_softmax_text_prototypes(
-            encoded, mask, text[c:c+1])[0][:, 0]
+        weights = model.label_pre_temporal.routing_weights(raw[support], text[c:c+1], mask)[:, 0]
+        frames = (encoded * weights[..., None]).sum(-2)
         prototypes.append(frames[positive[:, c]].mean(0))
     expected = torch.stack(prototypes)
     torch.testing.assert_close(result["query_partial_support_prototypes"], expected)
@@ -153,16 +153,15 @@ def test_batched_role_gates_match_split_outputs_and_gradients_with_one_key_proje
 
 
 @pytest.mark.parametrize("classification", [False, True])
-@pytest.mark.parametrize("post_readout", [False, True])
-@pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5, 6, 7, 8, 99])
-def test_routing_checkpoint_guards_changed_semantics(classification, post_readout, source_version):
-    model = _new_model(classification=classification, post_readout=post_readout)
-    destination = (7 if post_readout else 5) + int(classification)
+@pytest.mark.parametrize("source_version", [*range(1, 9), *range(13, 25), 29, 30, 99])
+def test_routing_checkpoint_guards_changed_semantics(classification, source_version):
+    model = _new_model(classification=classification)
+    destination = 29 + int(classification)
     state = model.state_dict()
     state["label_pre_temporal.architecture_version"] = torch.tensor(source_version)
     if source_version == destination:
         assert not validate_label_pre_temporal_checkpoint(model, state)
-    elif source_version == 99:
+    elif source_version == 99 or source_version in range(13, 21):
         with pytest.raises(ValueError, match="mismatch"):
             validate_label_pre_temporal_checkpoint(model, state, allow_init=True)
     else:

@@ -34,7 +34,6 @@ class LabelPreTemporalRouting(nn.Module):
         self.activation_checkpoint = bool(cfg.ACTIVATION_CHECKPOINT)
         self.batch_raw_quality = bool(cfg.BATCH_RAW_QUALITY)
         self.readout_checkpoint = bool(cfg.READOUT_CHECKPOINT)
-        self.post_support_readout = bool(cfg.POST_SUPPORT_READOUT)
         self.global_classifier = bool(global_classifier)
         if not math.isfinite(self.temperature) or self.temperature <= 0:
             raise ValueError("ROUTE_TEMPERATURE must be finite and positive.")
@@ -56,16 +55,12 @@ class LabelPreTemporalRouting(nn.Module):
             # This does NOT remove the original Transformer temporal/spatial QKV.
             self.query = nn.Identity()
             self.key = nn.Identity()
-        # v5/v6 retain asymmetric conditions and replace v3/v4 Value gating
-        # with temporal AND spatial logit bias, without/with global loss.
-        # v7/v8 change only final Query readout to Post Support + text,
-        # without/with global loss. Encoding conditions remain Raw-based.
-        # v9-v12 are the corresponding original-space cosine scorers.
+        # v29/v30 (projected) and v31/v32 (cosine) reuse early softmax weights
+        # for BOTH main Post readouts. Rho retains its Post+text evidence path.
         # Within a scorer family, changed semantics require explicit init;
         # cross-scorer loading is rejected, never silently resume.
         self.register_buffer("architecture_version", torch.tensor(
-            (7 if self.post_support_readout else 5) + int(self.global_classifier)
-            + (4 if self.scoring == "cosine" else 0),
+            29 + int(self.global_classifier) + (2 if self.scoring == "cosine" else 0),
             dtype=torch.int64))
 
     def routing_weights(self, raw, labels, mask):
@@ -92,7 +87,7 @@ class LabelPreTemporalRouting(nn.Module):
                 scores = scores.clamp(-1., 1.)
             return _masked_softmax(scores / self.temperature, mask[:, None])
 
-    def forward(self, raw, labels, mask):
+    def forward(self, raw, labels, mask, return_weights=False):
         weights = self.routing_weights(raw, labels, mask)
         with torch.autocast(device_type=raw.device.type, enabled=False):
             count = mask.sum(-1, keepdim=True)[:, None]
@@ -100,7 +95,9 @@ class LabelPreTemporalRouting(nn.Module):
             # Invalid tokens are governed by the original attention mask, not
             # invented evidence. An empty routing row has a neutral gate.
             gate = torch.where(mask[:, None], gate, torch.ones_like(gate))
-        return gate
+        # Return the SAME softmax probabilities used to form g, not a second
+        # scoring call and not normalized gates. Keep gradients to the router.
+        return (gate, weights) if return_weights else gate
 
     def attention_biases(self, gate):
         """Convert [B,T,N] positive priors to source-time/source-patch biases.
@@ -128,7 +125,7 @@ def _initial_conditions(model, raw, evidence_mask, support_indices, positive, te
     """Build QUERY conditions from text-weighted positive Raw Support only.
 
     This coarse summary is not the final matching prototype. Support encoding
-    and its matching readout remain text-only; all main trajectories survive.
+    uses text-only priors; main Post readout reuses these priors' probabilities.
     """
     support_raw = raw.index_select(0, support_indices)
     support_valid = evidence_mask.index_select(0, support_indices)
@@ -183,14 +180,60 @@ def _encode(model, tokens, token_mask, state, gate, return_global=False):
     return (patches, global_feature) if return_global else patches
 
 
-def _support_chunk(model, tokens, token_mask, state, gate, route_mask, texts):
+def _pool_post(value, weights):
+    """Pool Post tokens with existing [B,K,T,N] weights; no new scores/softmax."""
+    with torch.autocast(device_type=value.device.type, enabled=False):
+        clean = torch.nan_to_num(value.float(), nan=0., posinf=0., neginf=0.)
+        mass = weights.float().sum(-1, keepdim=True)
+        frames = torch.einsum("bktn,btnd->bktd", weights.float(), clean)
+        frames = frames / torch.where(mass > 0, mass.clamp_min(1e-6), torch.ones_like(mass))
+    return torch.nan_to_num(frames.to(value.dtype), nan=0., posinf=0., neginf=0.)
+
+
+def _pool(model, value, weights):
+    if model.label_pre_temporal.readout_checkpoint and model.training and torch.is_grad_enabled():
+        return checkpoint(_pool_post, value, weights, use_reentrant=False)
+    return _pool_post(value, weights)
+
+
+def _support_chunk(model, tokens, token_mask, state, gate, weights):
     encoded, global_sum = _encode_with_global(model, tokens, token_mask, state, gate)
-    frames = torch.stack([
-        _readout(model, value, route_mask, text)[0]
-        for value, text in zip(encoded, texts)
+    frames = torch.cat([
+        _pool(model, value, weights[:, k:k+1])
+        for k, value in enumerate(encoded)
     ], 1)
-    # Text readout for matching; fused-condition readout for rho references.
-    return frames[:, :, 0], frames[:, :, 1], global_sum
+    return frames, encoded, global_sum
+
+
+def _support_class_chunk(model, chunks, gates, weights, text, positive):
+    """Encode once, then read per-Support references with Post prototype+text.
+
+    Keep Post tokens only for the current class group. The outer checkpoint
+    encloses main pooling and the rho read so Post caches are not its outputs.
+    Video chunking still bounds every encoder call; no second encoder pass.
+    """
+    parts = [
+        _support_chunk(model, xt, xm, st, gates.index_select(0, ix), weights.index_select(0, ix))
+        for ix, xt, xm, st, rm, _, _ in chunks
+    ]
+    match_parts, post_parts, globals_ = zip(*parts)
+    match_frames = torch.cat(match_parts, 0)
+    pos = positive[:, :, None, None]
+    prototype = (match_frames * pos).sum(0) / pos.sum(0).clamp_min(1)
+    verifier = model.query_evidence_verifier
+    global_sum = torch.cat(globals_, 0) if model.label_pre_temporal.global_classifier else None
+    if verifier is None or not verifier.uniqueness:
+        return prototype, None, None, global_sum
+    condition = model._fuse_episode_text_with_support_visual(text, prototype)[0]
+    # All Supports, including known negatives, retain their individual frames.
+    references = torch.cat([
+        torch.cat([
+            _readout(model, value, chunk[4], condition[k:k+1])[0]
+            for k, value in enumerate(post)
+        ], 1)
+        for chunk, post in zip(chunks, post_parts)
+    ], 0)
+    return prototype, references, condition, global_sum
 
 
 def _readout(model, value, route_mask, text):
@@ -237,29 +280,35 @@ def _encode_with_global(model, tokens, token_mask, state, gates):
     return patches, global_features.float().sum(dim=0)
 
 
-def _query_chunk(model, tokens, token_mask, state, gate, route_mask, raw_query,
-                 query_valid, raw_support, support_valid, text, readout_condition,
-                 references, reference_valid, support_labels, support_known):
+def _query_chunk(model, tokens, token_mask, state, gate, early_weights, route_mask, raw_query,
+                 query_valid, raw_support, support_valid, text,
+                 rho_condition, references, reference_valid, support_labels, support_known):
     encoded, global_sum = _encode_with_global(model, tokens, token_mask, state, gate)
     parts = []
     verifier = model.query_evidence_verifier
     for k, value in enumerate(encoded):
-        frames, weights = _readout(model, value, route_mask, readout_condition[k:k+1])
-        hypothesis_weights = normalize_patch_region_weights(weights, query_valid)
+        weights = early_weights[:, k:k+1]
+        frames = _pool(model, value, weights)
+        rho_weights = weights
+        if verifier is not None and verifier.uniqueness:
+            # Rho deliberately retains its Post-conditioned evidence weights;
+            # only main matching reuses early weights. M stays Raw-only.
+            rho_weights = _readout(model, value, route_mask, rho_condition[k:k+1])[1]
+        hypothesis_weights = normalize_patch_region_weights(rho_weights, query_valid)
         outputs = {}
         # Singleton class calls preserve the existing metric/quality kernels.
         # Query and ALL positive/negative Supports refer to the same candidate
         # class, with shared encoder parameters but asymmetric gates (Support:
-        # text; Query: Raw-fused condition). Rho keeps its Raw-fused Support
-        # reference readout and consumes the final Query hypothesis weights,
-        # which change when Post Support readout is enabled.
+        # text; Query: Raw-fused condition). Both rho reads use Post positive-
+        # Support prototype + text, independently of the main pooling weights.
         # Never flatten class-specific tokens into shared references.
         if verifier is not None:
             outputs = verifier(
                 raw_query=raw_query, raw_support=raw_support, text=text[k:k+1],
-                post_query=value, post_references=references[:, k:k+1],
+                post_query=value, post_references=references[:, k:k+1] if references is not None else None,
                 query_weights=hypothesis_weights, query_valid=query_valid,
-                support_raw_valid=support_valid, support_frame_valid=reference_valid[:, k:k+1],
+                support_raw_valid=support_valid,
+                support_frame_valid=reference_valid[:, k:k+1] if reference_valid is not None else None,
                 support_labels=support_labels[:, k:k+1], support_known=support_known[:, k:k+1],
                 quality_output={} if model.label_pre_temporal.batch_raw_quality else None)
         parts.append((frames, weights, hypothesis_weights, outputs))
@@ -332,7 +381,7 @@ def label_conditioned_episode(model, features, raw, metadata):
     # Post features or Query truth. Preserve original (possibly interleaved)
     # video order and avoid expanding the large [B,K,T,N,D] Raw tensor.
     video_conditions = torch.where(support_mask[:, None, None], text[None], condition[None])
-    gates = _call(router, router, raw, video_conditions, route_mask)
+    gates, early_weights = _call(router, router, raw, video_conditions, route_mask, True)
     tokens, token_mask, state = _prepare(model, features, route_mask)
 
     def chunks(indices):
@@ -360,35 +409,21 @@ def label_conditioned_episode(model, features, raw, metadata):
                 router, model.query_evidence_verifier.compute_raw_quality,
                 raw_query, raw_support, text[classes], query_valid, support_valid,
                 labels[:, classes], known[:, classes])
-        support_parts = []
-        texts = torch.stack((text[classes], condition[classes]), 1)
-        for ix, xt, xm, st, rm, _, _ in support_chunks:
-            support_parts.append(_call(
-                router, partial(_support_chunk, model), xt, xm, st,
-                gates[:, classes].index_select(0, ix), rm, texts))
-        match_parts, reference_parts, support_globals = zip(*support_parts)
-        match_frames, references = torch.cat(match_parts, 0), torch.cat(reference_parts, 0)
+        support_prototype, references, rho_condition, support_global = _call(
+            router, partial(_support_class_chunk, model), support_chunks,
+            gates[:, classes], early_weights[:, classes], text[classes], positive[:, classes])
         if router.global_classifier:
-            global_sum = global_sum.index_add(0, si, torch.cat(support_globals, 0))
-        # Retain original positive-Support mean for the matcher.
-        pos = positive[:, classes, None, None]
-        support_prototype = (match_frames * pos).sum(0) / pos.sum(0).clamp_min(1)
+            global_sum = global_sum.index_add(0, si, support_global)
         all_support.append(support_prototype)
-        # Reuse the matching Post prototype, not the Raw summary or rho
-        # references. Fusion honors VISUAL_DETACH without detaching the
-        # prototype used by the matcher. No extra encoder / Query truth.
-        readout_condition = (
-            model._fuse_episode_text_with_support_visual(text[classes], support_prototype)[0]
-            if router.post_support_readout else condition[classes]
-        )
-        reference_valid = support_valid.any(-1)[:, None] & references.float().norm(dim=-1).gt(1e-12)
+        reference_valid = (support_valid.any(-1)[:, None] & references.float().norm(dim=-1).gt(1e-12)
+                           if references is not None else None)
         query_parts = []
         for ix, xt, xm, st, rm, rq, ev in query_chunks:
             query_parts.append(_call(
                 router, partial(_query_chunk, model), xt, xm, st,
-                gates[:, classes].index_select(0, ix), rm, rq, ev,
-                raw_support, support_valid, text[classes], readout_condition,
-                references, reference_valid, labels[:, classes], known[:, classes]))
+                gates[:, classes].index_select(0, ix), early_weights[:, classes].index_select(0, ix), rm, rq, ev,
+                raw_support, support_valid, text[classes],
+                rho_condition, references, reference_valid, labels[:, classes], known[:, classes]))
         frames, weights, hypotheses, outputs, query_globals = zip(*query_parts)
         if router.global_classifier:
             global_sum = global_sum.index_add(0, qi, torch.cat(query_globals, 0))

@@ -1,9 +1,5 @@
-_BASE_: sav_label_pre_temporal_post_readout.yaml
+_BASE_: sav.yaml
 
-# v12 vs v8: remove only learned routing Q/K projections.
-# Direct cosine + masked patch softmax still conditions both temporal/spatial
-# attention BEFORE final readout; retain 256 trajectories and Post readout.
-OUTPUT_DIR: output/sav_label_pre_temporal_cosine_relation_decision_st_bias_cls
-FEW_SHOT:
-  LABEL_PRE_TEMPORAL:
-    SCORING: cosine
+# Compatibility alias: the complete active v32 experiment now lives in sav.yaml.
+# Both entrypoints use early cosine routing, reuse early weights for main Post
+# pooling, and retain the separate Post+text rho judgment and unchanged Raw m.

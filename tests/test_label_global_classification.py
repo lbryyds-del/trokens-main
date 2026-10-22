@@ -16,7 +16,7 @@ from tools.few_shot_multilabel import compute_query_partial_q2s_loss
 from trokens.config.defaults import get_cfg
 
 
-@pytest.mark.parametrize("config_name", ["sav_label_pre_temporal.yaml",
+@pytest.mark.parametrize("config_name", ["sav.yaml", "sav_label_pre_temporal.yaml",
                                        "sav_label_pre_temporal_parallel.yaml",
                                        "sav_label_pre_temporal_fast.yaml",
                                        "sav_label_pre_temporal_post_readout.yaml",
@@ -190,7 +190,7 @@ def test_global_bce_supervises_all_videos_only_seen_classes_and_trains_router():
 
 
 @pytest.mark.parametrize("source_version", [1, 2, 3, 4, 5])
-def test_classifier_checkpoint_requires_explicit_initialization_and_v6_resumes(tmp_path, source_version):
+def test_classifier_checkpoint_requires_explicit_initialization_and_v30_resumes(tmp_path, source_version):
     old = _new_model()
     model = _new_model(classification=True)
     old_state = old.state_dict()
@@ -206,7 +206,7 @@ def test_classifier_checkpoint_requires_explicit_initialization_and_v6_resumes(t
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=1e-3)
     assert load_checkpoint(str(old_path), model, data_parallel=False, optimizer=optimizer,
                            allow_label_pre_temporal_init=True) == -1
-    assert model.label_pre_temporal.architecture_version.item() == 6
+    assert model.label_pre_temporal.architecture_version.item() == 30
     assert model.head.weight.requires_grad and not optimizer.state
     features, raw, meta = _episode()
     output = label_conditioned_episode(model, features, raw, meta)
@@ -219,7 +219,7 @@ def test_classifier_checkpoint_requires_explicit_initialization_and_v6_resumes(t
     restored = _new_model(classification=True)
     opt = torch.optim.AdamW((p for p in restored.parameters() if p.requires_grad), lr=1e-3)
     assert load_checkpoint(str(path), restored, data_parallel=False, optimizer=opt) == 2
-    assert opt.state and restored.label_pre_temporal.architecture_version.item() == 6
+    assert opt.state and restored.label_pre_temporal.architecture_version.item() == 30
     torch.testing.assert_close(restored.head.weight, model.head.weight, atol=0, rtol=0)
     assert opt.state[restored.head.weight]["step"] == optimizer.state[model.head.weight]["step"]
 

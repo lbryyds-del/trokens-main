@@ -1,6 +1,6 @@
 TASK: few_shot
 NUM_GPUS: 1
-OUTPUT_DIR: output/sav_relation_decision
+OUTPUT_DIR: output/sav_label_pre_temporal_cosine_relation_decision_reuse_pre_weights_post_rho_st_bias_cls
 
 FEW_SHOT:
   N_WAY: 5
@@ -9,6 +9,23 @@ FEW_SHOT:
   TEST_QUERY_PER_CLASS: 1
   TRAIN_EPISODES: 2000
   TEST_EPISODES: 10000
+  CLASS_LOSS_LAMBDA: 1.0
+  # Active v32: route before temporal/spatial modeling; reuse the same patch
+  # probabilities for Support/Query main Post pooling (no second scoring).
+  # Rho keeps its separate Post positive-Support prototype + text evidence reads.
+  LABEL_PRE_TEMPORAL:
+    ENABLE: True
+    SCORING: cosine
+    ROUTE_TEMPERATURE: 0.04
+    GATE_STRENGTH: 0.25
+    TEMPORAL_BIAS_SCALE: 1.0
+    SPATIAL_BIAS_SCALE: 1.0
+    CLASS_CHUNK_SIZE: 5
+    VIDEO_CHUNK_SIZE: 8
+    ACTIVATION_CHECKPOINT: False
+    BATCH_RAW_QUALITY: True
+    MLP_CHECKPOINT: True
+    READOUT_CHECKPOINT: True
   SUPPORT_TEXT_FUSION:
     ENABLE: True
     TEXT_WEIGHT: 1.0

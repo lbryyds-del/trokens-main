@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import yaml
 
 from trokens.config.defaults import assert_and_infer_cfg, get_cfg
 
@@ -16,6 +17,25 @@ def test_dataset_config_merges(path):
     cfg = get_cfg()
     cfg.merge_from_file(str(path))
     assert_and_infer_cfg(cfg)
+
+
+def test_sav_explicitly_defines_active_early_profile_and_cosine_alias_matches():
+    with (CONFIGS / "sav.yaml").open() as stream:
+        explicit = yaml.safe_load(stream)
+    assert "_BASE_" not in explicit
+    expected = dict(
+        ENABLE=True, SCORING="cosine", ROUTE_TEMPERATURE=.04, GATE_STRENGTH=.25,
+        TEMPORAL_BIAS_SCALE=1., SPATIAL_BIAS_SCALE=1., CLASS_CHUNK_SIZE=5,
+        VIDEO_CHUNK_SIZE=8, ACTIVATION_CHECKPOINT=False, BATCH_RAW_QUALITY=True,
+        MLP_CHECKPOINT=True, READOUT_CHECKPOINT=True,
+    )
+    assert explicit["FEW_SHOT"]["LABEL_PRE_TEMPORAL"] == expected
+    active, alias = get_cfg(), get_cfg()
+    active.merge_from_file(str(CONFIGS / "sav.yaml"))
+    alias.merge_from_file(str(CONFIGS / "sav_label_pre_temporal_cosine.yaml"))
+    assert active == alias
+    assert active.FEW_SHOT.CLASS_LOSS_LAMBDA == 1.
+    assert not active.TRAIN.AUTO_RESUME and not active.TRAIN.CHECKPOINT_FILE_PATH
 
 
 def test_few_shot_loader_uses_episode_sampler_instead_of_generic_batch_size(monkeypatch):

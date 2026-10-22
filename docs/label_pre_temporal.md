@@ -1,5 +1,87 @@
 # SAV 前置标签条件建模：时间＋空间注意力偏置
 
+## 当前：主匹配复用前置权重（v29–v32，2026-10-22）
+
+前置路由一次返回 `g` 和原始 patch softmax 概率 `a`。`g` 仍生成时间/空间注意力偏置；
+`a` 直接复用于同一视频、同一候选类、同一帧的 Post patch 聚合：`F = sum_n(a_n * Post_n)`。
+使用的是 softmax 概率，不是归一化后的门控 `g`，没有第二次主匹配相似度/softmax，
+没有 detach 复用权重；空 mask 的概率及聚合特征均为零，聚合内部保持 FP32。
+
+- Support：原文本生成的前置权重聚合 Post，已知正例均值得到主匹配原型。
+- Query：Raw 正 Support＋文本生成的前置权重聚合 Post；不再用 Post 条件重新读主匹配特征。
+- rho：保留独立的 Post 正 Support 匹配原型＋文本条件、逐 Support 正负帧参考、
+  Post Query 核验权重和原度量公式。原型随主聚合变化，因此 rho 数值不保证不变。
+- m、前置条件/偏置、时空编码、全局分类、BiMHM 和损失定义均未修改；非前置基线不受影响。
+
+移除 `POST_SUPPORT_READOUT` 选择开关。原 post_readout YAML 文件名保留为 fast 的输出目录别名，
+不再代表另一种主读出结构。输出目录新增 `reuse_pre_weights`。
+投影版本为 v29/v30（无/有分类），cosine 为 v31/v32；常用 cosine 配置是 v32。
+旧 v1–v12、v21–v28 不能直接续训/评估，同 scorer 仅可显式重置初始化；跨 scorer 仍拒绝。
+没有启动训练。下文的旧权重来源、版本号、测试数量及性能记录仅适用于对应历史实现。
+
+本版验证：CPU 全量 `441 passed, 74 skipped`；覆盖一次前置打分、直接加权聚合、
+路由梯度、mask、类别/视频分块、checkpoint 和两进程 CPU DDP。
+12 组固定权重对照确认编码特征及 m/全局分类输出保持一致，4 组 CPU BF16 前向/反向有限。
+rho 度量函数与原版 AST 一致，独立 Post 核验 oracle 通过；dry-run 与 diff 检查通过。
+未验证真实数据精度或 GPU 显存/吞吐。
+
+### 默认配置已集中到 sav.yaml
+
+`configs/trokens/sav.yaml` 显式写入全部前置参数：ENABLE=True、SCORING=cosine、
+温度 .04、门控强度 .25、时间/空间偏置各 1、5 类 × 8 视频分块、Raw m 批处理、
+MLP/读出 checkpoint 开启，外层及 verifier checkpoint 关闭。全局分类权重仍为 1。
+Support/Query 主 Post 聚合固定复用前置权重；ρ 保留独立 Post+文本核验，不再添加选择开关。
+`sav_label_pre_temporal_cosine.yaml` 是直接继承 sav 的兼容别名；原投影对照配置显式覆盖
+scorer 和 checkpoint/批处理选项，保持原有有效配置。m、ρ、数据和优化参数未改。
+
+新输出目录为 `output/sav_label_pre_temporal_cosine_relation_decision_reuse_pre_weights_post_rho_st_bias_cls`。
+默认启动器使用 sav；可先只检查命令（不会训练）：
+
+```bash
+/home/duanwei/miniconda3/envs/trokens/bin/python tools/run_local.py --dry-run
+```
+
+配置修改只对新启动生效，已有训练进程不会自动切换。本次未启动或重启训练。
+集中后再次验证：sav 的完整有效配置与集中前 cosine 配置完全一致，五个已有前置配置
+的有效值均未变化；CPU 全量 `443 passed, 74 skipped`，默认启动 dry-run 与 diff 检查通过。
+
+## 历史：恢复原版 Post rho 证据链（v21–v28，2026-10-22）
+
+恢复 `a5134b8` 的 rho 逻辑，不回退整个编码器或质量头：
+
+1. Support Post 由原文本加权读出；已知正 Support 平均得到匹配原型 `P_post`。
+2. `P_post` 按原融合函数与文本生成 `L_post`，保留有效帧规则和 `VISUAL_DETACH`。
+3. 同一个 `L_post` 读取全部 Support 的逐帧参考（正负均保留），并生成 Query Post patch 权重。
+4. Query Post patch 与正/负 Support 帧参考分别算余弦，集合内做数量归一化的
+   log-mean-exp，再按 Query 权重汇总正负差、缩放并 sigmoid，得到逐帧 rho。
+   rho 的度量函数、缺失参考回退、`m*rho`、主匹配与五项损失均未修改。
+
+Support 编码仍用纯文本；Query 编码仍用 Raw 正 Support＋文本，不新增编码分支。
+Support Post 仅缓存当前类别块，视频分块仍约束每次编码；外层 checkpoint 包住两次读出，
+不把完整 Support Post 缓存作为其输出。没有额外的一遍 Support 编码。
+
+`POST_SUPPORT_READOUT` 仍只选择主匹配 Query 的读出条件：True 时复用 Post 权重给 rho；
+False 时保留 Raw 条件主匹配，但 rho 单独使用 Post 条件权重。rho 两端始终对齐。
+`sav.yaml` 后置基线本就使用这条证据链，本次不改默认架构；五个既有前置配置的输出目录
+加入 `post_rho`，避免与原实验混淆，未新增开关/配置文件，也未启动训练。
+
+版本为投影路由 v21–v24、直接余弦 v25–v28（原版本号加 16）；cosine 配置为 v28。
+旧 v1–v12 不可直接续训/评估；同一 scorer 只允许显式 `CHECKPOINT_EPOCH_RESET=True`
+初始化并重置 epoch/optimizer/scaler。v13–v20 属于其他实验，拒绝加载。
+跨 scorer 仍禁止迁移；同新版完整 checkpoint 可正常续训。可控对照应从头训练。
+
+本次 CPU 回归：`480 passed, 74 skipped`（隐藏 CUDA）；含两进程 CPU DDP 检查。
+另以相同权重对照修改前代码的 12 组条件，编码次数/特征、主匹配原型/权重/分数、m 与
+全局分类输出及这些独立分支的梯度均保持一致，rho 按预期变化。
+rho 两个度量函数与 `a5134b8` 的 AST 一致；新增独立计算检查覆盖共享 Post 条件、
+逐 Support 参考、Query 权重、正负汇总及无效帧回退。启动器 dry-run 和 diff 检查通过。
+这些只验证实现与边界，不代表真实数据精度、GPU 显存或收敛结果。
+
+## 以下为历史 v5–v12 记录
+
+下文的版本号、Raw rho 参考、旧权重加载方式、性能与测试数字均描述历史实现，
+不代表上述当前版本；历史启动命令若使用，必须另选包含 `post_rho` 的新输出目录。
+
 原对照配置为 **v6**：Support 纯文本、Query 正 Support Raw＋文本，
 在原 `Temporal → Spatial → MLP → Norm` 串行块内修改注意力分数。
 旧的时间 Value 乘法门控实现已替换，不保留旧模式开关，不新增并行编码分支。

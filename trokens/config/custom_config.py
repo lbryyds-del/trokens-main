@@ -33,8 +33,8 @@ def add_custom_config(cfg):
     # Opt-in single-path Label -> Patch priors inside serial temporal/spatial attention.
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL = CfgNode()
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE = False
-    # projected_cosine: learned label/Raw projections (v5-v8 control).
-    # cosine: original-space cosine, no learned routing Q/K (v9-v12).
+    # projected_cosine: learned label/Raw projections (v29/v30).
+    # cosine: original-space cosine, no learned routing Q/K (v31/v32).
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.SCORING = "projected_cosine"
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ROUTE_TEMPERATURE = 0.04
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.GATE_STRENGTH = 0.25
@@ -42,9 +42,8 @@ def add_custom_config(cfg):
     # only that attention bias, not the downstream class-conditioned readout.
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.TEMPORAL_BIAS_SCALE = 1.0
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.SPATIAL_BIAS_SCALE = 1.0
-    # Keep Raw Support+text for encoding; optionally use Post matching Support
-    # prototypes+text ONLY for the final Query readout. False preserves v5/v6.
-    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.POST_SUPPORT_READOUT = False
+    # Main Support/Query Post pooling always reuses their early probabilities.
+    # Rho separately retains Post positive-Support+text for both evidence reads.
     # Fold independent classes into the video batch; 1 keeps serial execution.
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.CLASS_CHUNK_SIZE = 1
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.VIDEO_CHUNK_SIZE = 4

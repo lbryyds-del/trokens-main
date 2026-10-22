@@ -14,7 +14,7 @@ from trokens.utils.checkpoint import validate_label_pre_temporal_checkpoint, loa
 
 
 def _cosine_model(**kwargs):
-    return _new_model(post_readout=True, scoring="cosine", **kwargs)
+    return _new_model(scoring="cosine", **kwargs)
 
 
 def test_cosine_config_changes_only_scoring_and_output():
@@ -26,7 +26,7 @@ def test_cosine_config_changes_only_scoring_and_output():
     old, new = configs
     assert old.FEW_SHOT.LABEL_PRE_TEMPORAL.SCORING == "projected_cosine"
     assert new.FEW_SHOT.LABEL_PRE_TEMPORAL.SCORING == "cosine"
-    assert new.FEW_SHOT.LABEL_PRE_TEMPORAL.POST_SUPPORT_READOUT
+    assert "POST_SUPPORT_READOUT" not in new.FEW_SHOT.LABEL_PRE_TEMPORAL
     assert new.OUTPUT_DIR != old.OUTPUT_DIR
     new.FEW_SHOT.LABEL_PRE_TEMPORAL.SCORING = "projected_cosine"
     new.OUTPUT_DIR = old.OUTPUT_DIR
@@ -90,7 +90,7 @@ def test_original_space_cosine_preserves_raw_and_condition_gradients():
 
 
 def test_initial_episode_matches_identity_projected_control_and_shared_gradients():
-    control = _new_model(classification=True, post_readout=True)
+    control = _new_model(classification=True)
     model = _cosine_model(classification=True)
     # The constructor preserves all shared initial weights and RNG state.
     for name, value in model.state_dict().items():
@@ -189,17 +189,16 @@ def test_cosine_chunk_checkpoint_empty_masks_and_gradients(quality, uniqueness, 
 
 
 @pytest.mark.parametrize("classification", [False, True])
-@pytest.mark.parametrize("post_readout", [False, True])
-def test_cosine_checkpoint_semantics_and_cross_scorer_rejection(classification, post_readout):
-    model = _new_model(scoring="cosine", classification=classification, post_readout=post_readout)
-    assert model.label_pre_temporal.architecture_version.item() == 9 + 2*int(post_readout) + int(classification)
+def test_cosine_checkpoint_semantics_and_cross_scorer_rejection(classification):
+    model = _new_model(scoring="cosine", classification=classification)
+    assert model.label_pre_temporal.architecture_version.item() == 31 + int(classification)
     assert not validate_label_pre_temporal_checkpoint(model, model.state_dict())
-    learned = _new_model(classification=classification, post_readout=post_readout)
+    learned = _new_model(classification=classification)
     for destination, source in ((model, learned), (learned, model)):
         for allow_init in (False, True):
             with pytest.raises(ValueError, match="SCORING mismatch"):
                 validate_label_pre_temporal_checkpoint(destination, source.state_dict(), allow_init=allow_init)
-    for version in (9, 10, 11, 12):
+    for version in (9, 10, 11, 12, 25, 26, 27, 28, 31, 32):
         if version == model.label_pre_temporal.architecture_version.item():
             continue
         state = model.state_dict()
@@ -224,7 +223,7 @@ def test_cosine_checkpoint_restores_optimizer_and_predictions(tmp_path):
     restored = _cosine_model(classification=True)
     opt = torch.optim.AdamW((p for p in restored.parameters() if p.requires_grad), lr=1e-4)
     assert load_checkpoint(str(path), restored, data_parallel=False, optimizer=opt) == 4
-    assert restored.label_pre_temporal.architecture_version.item() == 12
+    assert restored.label_pre_temporal.architecture_version.item() == 32
     assert opt.state[restored.head.weight]["step"] == optimizer.state[model.head.weight]["step"]
     first = label_conditioned_episode(model.eval(), features, raw, meta)
     second = label_conditioned_episode(restored.eval(), features, raw, meta)
@@ -273,4 +272,4 @@ def test_cosine_two_rank_ddp_accumulation(tmp_path, cuda, checkpoint, selective)
     torch.multiprocessing.spawn(
         _single_path_ddp_worker,
         args=((tmp_path / "cosine_rendezvous").as_uri(), cuda, 2, checkpoint, selective, selective,
-              True, True, "cosine"), nprocs=2, join=True)
+              True, "cosine"), nprocs=2, join=True)

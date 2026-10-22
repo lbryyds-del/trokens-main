@@ -29,6 +29,9 @@ def _model(quality=True, uniqueness=True, checkpoint=False, quality_mode="semant
     model = Pointformer.__new__(Pointformer)
     nn.Module.__init__(model)
     model.cfg = _cfg()
+    # This miniature fixture isolates the late verifier; sav now selects early
+    # routing. Early-path tests explicitly build their encoder/router on top.
+    model.cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE = False
     cfg = model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY
     cfg.QUALITY_ENABLE = quality
     cfg.UNIQUENESS_ENABLE = uniqueness

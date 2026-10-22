@@ -353,9 +353,13 @@ def validate_label_pre_temporal_checkpoint(model, state_dict, allow_init=False):
     source, destination = version.item(), module.architecture_version.item()
     reinitializing = source != destination
     if reinitializing:
-        if source not in range(1, 13) or destination not in range(5, 13):
+        # v29-v32 reuse early weights for main pooling; v21-v28 used separate
+        # Post scores. v13-v20 belonged to other, incompatible experiments.
+        if (source not in (*range(1, 13), *range(21, 33))
+                or destination not in range(29, 33)):
             raise ValueError("Label-pre-temporal checkpoint architecture mismatch.")
-        if (source >= 9) != (destination >= 9):
+        source_cosine = source in (*range(9, 13), *range(25, 29), 31, 32)
+        if source_cosine != (module.scoring == "cosine"):
             # Deliberately no implicit Q/K addition/removal or optimizer
             # migration. This experiment must be trained independently.
             raise ValueError(
@@ -364,7 +368,7 @@ def validate_label_pre_temporal_checkpoint(model, state_dict, allow_init=False):
                 "Start a fresh run with the intended SCORING configuration.")
         if not allow_init:
             raise ValueError(
-                "Label-pre-temporal attention/routing/readout/global classification semantics changed "
+                "Label-pre-temporal attention/routing/readout/rho/global classification semantics changed "
                 f"(v{source} -> v{destination}). Requires explicit "
                 "CHECKPOINT_EPOCH_RESET=True initialization, not resume/evaluation.")
     expected = {name: value for name, value in model.named_parameters() if value.requires_grad}
@@ -374,7 +378,7 @@ def validate_label_pre_temporal_checkpoint(model, state_dict, allow_init=False):
     if missing:
         raise ValueError("Incomplete Label-pre-temporal checkpoint: " + ", ".join(missing[:6]))
     if reinitializing:
-        logger.warning("Initializing Label-pre-temporal v%s from v%s weights; routing, readout or "
+        logger.warning("Initializing Label-pre-temporal v%s from v%s weights; routing, readout, rho or "
                        "classification semantics differ. Resetting epoch, optimizer and scaler.",
                        destination, source)
         # Do not overwrite the destination contract with the source marker.

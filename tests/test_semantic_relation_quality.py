@@ -19,7 +19,7 @@ def test_config_and_no_old_quality_classifier_or_class_specific_parameters():
     cfg = _cfg()
     vc = cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER
     assert vc.QUALITY_MODE == "relation_decision" and "UNIQUENESS_MODE" not in vc
-    assert cfg.OUTPUT_DIR == "output/sav_relation_decision"
+    assert cfg.OUTPUT_DIR == "output/sav_label_pre_temporal_cosine_relation_decision_reuse_pre_weights_post_rho_st_bias_cls"
     assert not cfg.TRAIN.AUTO_RESUME and cfg.TRAIN.CHECKPOINT_FILE_PATH == ""
     verifier = _verifier()
     assert verifier.architecture_version.item() == 3

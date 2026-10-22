@@ -249,7 +249,7 @@ def main():
             routing_version=int(core.label_pre_temporal.architecture_version.item()),
             routing_scoring=core.label_pre_temporal.scoring,
             routing_parameters=sum(p.numel() for p in core.label_pre_temporal.parameters()),
-            post_support_readout=core.label_pre_temporal.post_support_readout,
+            main_readout="reuse_early_weights",
             temporal_bias_scale=core.label_pre_temporal.temporal_bias_scale,
             spatial_bias_scale=core.label_pre_temporal.spatial_bias_scale,
             video_chunk=core.label_pre_temporal.video_chunk_size,

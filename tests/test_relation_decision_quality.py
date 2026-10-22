@@ -16,11 +16,11 @@ def _new(**kwargs):
     return _model(quality_mode="relation_decision", **kwargs)
 
 
-def test_sav_selects_quality_only_experiment_and_preserves_training_contract():
+def test_sav_keeps_relation_decision_quality_and_preserves_training_contract():
     cfg = _cfg()
     matchability = cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY
     verifier = matchability.LEARNED_VERIFIER
-    assert cfg.OUTPUT_DIR == "output/sav_relation_decision"
+    assert cfg.OUTPUT_DIR == "output/sav_label_pre_temporal_cosine_relation_decision_reuse_pre_weights_post_rho_st_bias_cls"
     assert verifier.QUALITY_MODE == "relation_decision"
     assert "UNIQUENESS_MODE" not in verifier  # This branch only retains metric rho.
     assert (verifier.QUALITY_HIDDEN_DIM, verifier.QUALITY_DECISION_LOCAL_DIM,
@@ -30,7 +30,7 @@ def test_sav_selects_quality_only_experiment_and_preserves_training_contract():
     assert (verifier.QUERY_CHUNK_SIZE, verifier.ACTIVATION_CHECKPOINT, verifier.AMP_ENABLE) == (16, False, True)
     assert not cfg.TRAIN.AUTO_RESUME and not cfg.TRAIN.CHECKPOINT_FILE_PATH
     assert cfg.TRAIN.NEW_TRAIN
-    assert not cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE  # Selected by derived early-routing configs.
+    assert cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE
     assert verifier.DETACH_INPUTS and matchability.ABSOLUTE_MASS_ONE_SIDED
 
 

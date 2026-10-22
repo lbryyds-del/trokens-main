@@ -15,13 +15,14 @@ from trokens.utils.checkpoint import load_checkpoint
 
 def _decision(**kwargs):
     return _new_model(quality_mode="relation_decision", scoring="cosine",
-                      post_readout=True, classification=True, **kwargs)
+                      classification=True, **kwargs)
 
 
 def test_early_configs_inherit_new_quality_without_changing_routing_contract():
     root = Path(__file__).resolve().parents[1]
     paths = sorted((root / "configs/trokens").glob("sav_label_pre_temporal*.yaml"))
     assert len(paths) == 5
+    paths.append(root / "configs/trokens/sav.yaml")
     for path in paths:
         cfg = get_cfg()
         cfg.merge_from_file(str(path))
@@ -32,9 +33,12 @@ def test_early_configs_inherit_new_quality_without_changing_routing_contract():
         assert cfg.FEW_SHOT.CLASS_LOSS_LAMBDA == 1.
         assert (match.BASE_LOGIT_LOSS_WEIGHT, match.VERIFIED_LOGIT_LOSS_WEIGHT) == (.6, .4)
         assert "relation_decision" in cfg.OUTPUT_DIR
+        assert "post_rho" in cfg.OUTPUT_DIR
+        assert "reuse_pre_weights" in cfg.OUTPUT_DIR
+        assert "POST_SUPPORT_READOUT" not in early
         assert not cfg.TRAIN.AUTO_RESUME and not cfg.TRAIN.CHECKPOINT_FILE_PATH
-        if path.stem.endswith("cosine"):
-            assert early.SCORING == "cosine" and early.POST_SUPPORT_READOUT
+        if path.stem == "sav" or path.stem.endswith("cosine"):
+            assert early.SCORING == "cosine"
             assert (early.CLASS_CHUNK_SIZE, early.VIDEO_CHUNK_SIZE) == (5, 8)
             assert early.BATCH_RAW_QUALITY and early.MLP_CHECKPOINT and early.READOUT_CHECKPOINT
             assert not early.ACTIVATION_CHECKPOINT and not match.LEARNED_VERIFIER.ACTIVATION_CHECKPOINT
@@ -44,7 +48,7 @@ def test_early_configs_inherit_new_quality_without_changing_routing_contract():
 @pytest.mark.parametrize("batch_quality", [False, True])
 def test_only_quality_changes_not_early_encoding_prototypes_or_rho(quality, uniqueness, batch_quality):
     old = _new_model(quality=quality, uniqueness=uniqueness, scoring="cosine",
-                     post_readout=True, classification=True)
+                     classification=True)
     new = _decision(quality=quality, uniqueness=uniqueness)
     # Compare the same encoder, not differences caused by RNG consumption while
     # constructing differently sized heads in this miniature test harness.
@@ -132,7 +136,7 @@ def test_checkpoint_roundtrip_and_cross_quality_or_cross_routing_rejection(tmp_p
     # Early-routing validation checks all trainable keys before the verifier
     # version guard, so it may reject the changed head at that earlier check.
     with pytest.raises(ValueError, match="architecture|Incomplete Label-pre-temporal"):
-        load_checkpoint(str(path), _new_model(scoring="cosine", post_readout=True, classification=True),
+        load_checkpoint(str(path), _new_model(scoring="cosine", classification=True),
                         data_parallel=False)
     with pytest.raises(ValueError, match="LABEL_PRE_TEMPORAL"):
         load_checkpoint(str(path), _model(quality_mode="relation_decision"), data_parallel=False)
@@ -144,5 +148,5 @@ def test_two_gpu_amp_ddp_new_quality_with_early_cosine(tmp_path, outer_checkpoin
     torch.multiprocessing.spawn(
         _single_path_ddp_worker,
         args=("file://" + str(tmp_path / "ddp_init"), True, 2, outer_checkpoint,
-              not outer_checkpoint, not outer_checkpoint, True, True, "cosine", "relation_decision"),
+              not outer_checkpoint, not outer_checkpoint, True, "cosine", "relation_decision"),
         nprocs=2, join=True)

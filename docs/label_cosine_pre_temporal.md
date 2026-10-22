@@ -1,4 +1,33 @@
-# 前置直接余弦权重对照（v12）
+# 前置直接余弦权重对照
+
+## 当前版本 v32（2026-10-22）
+
+Support 和 Query 主匹配直接复用各自前置路由的 patch softmax 权重聚合 Post 特征。
+前置先验及时间/空间编码不变；不再为主聚合计算一次 Post 文本相似度，也不用门控 `g` 当权重。
+rho 保留独立的 Post 原型＋文本核验流程；m 不改。主原型变化会传递给 rho 条件。
+详见 [当前权重复用说明](label_pre_temporal.md)。
+
+完整配置已集中到 `sav.yaml`，默认启动直接使用本方案；
+`sav_label_pre_temporal_cosine.yaml` 仅作兼容别名，解析后的配置完全相同。
+输出目录包含 `reuse_pre_weights_post_rho`。
+`POST_SUPPORT_READOUT` 已移除，旧检查点不可直接续训或评估，公平对照应从头训练。
+默认已启用前置解耦；m/ρ 的判断逻辑和训练参数不变，未启动或重启训练。
+
+## 历史版本 v28（2026-10-22）
+
+前置编码、主匹配与质量头保持当前实现，仅恢复 `a5134b8` 的 Post rho 证据来源：
+Post 正 Support 匹配原型＋文本生成同一个 `L_post`，读取逐 Support 正负帧参考，
+并生成 Query 的 patch 核验权重。正负余弦比较、平滑汇总、sigmoid 与 `m*rho` 不变。
+详情和完整 checkpoint 边界见 [当前 Post rho 说明](label_pre_temporal.md)。
+
+现有 `sav_label_pre_temporal_cosine.yaml` 输出目录已加入 `post_rho`，版本从 v12 升为 v28。
+旧 v12 不可直接续训/评估；同 scorer 权重仅允许显式重置初始化。公平对照应从头训练。
+未改变 `sav.yaml` 的默认后置架构，也未启动训练。
+
+## 以下为 v12 历史记录
+
+下文的 Raw rho 参考、版本/加载约定以及实测结果属于历史实现，不能作为当前版本的验证。
+历史命令若使用，必须另选包含 `post_rho` 的新输出目录。
 
 本轮对照基于 v8，恢复旧式“直接相似度 → patch softmax”的权重生成方式，
 不把解耦挪回时空建模之后，不退回已删除的 Value 乘法门控。
