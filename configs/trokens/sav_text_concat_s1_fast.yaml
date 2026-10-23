@@ -1,0 +1,12 @@
+# Same single-text model and base-only loss. Execute 5 classes x 8 videos;
+# retain attention activations and recompute only MLP and final Post readout.
+# Alias with a separate output directory; sav.yaml uses the same execution profile.
+_BASE_: sav.yaml
+OUTPUT_DIR: output/sav_text_concat_t1_s1_fast_c5v8_selective_base
+FEW_SHOT:
+  TEXT_CONCAT_ST:
+    CLASS_CHUNK_SIZE: 5
+    VIDEO_CHUNK_SIZE: 8
+    ACTIVATION_CHECKPOINT: False
+    MLP_CHECKPOINT: True
+    READOUT_CHECKPOINT: True

@@ -83,6 +83,21 @@ class Attention(nn.Module):
         attn, valid_rows = self._weights(logits, key_mask, key_bias)
         return self.aggregate(attn, v, valid_rows)
 
+    def forward_with_text_readout(self, x, mask, visual_mask, visual_start, text_count):
+        """Reuse spatial QK: text queries read ONLY valid visual keys.
+
+        Renormalizing the pre-dropout attention submatrix over visual keys is
+        exactly softmax of those selected logits. No second QKV or scorer.
+        """
+        logits, values, key_mask = self.prepare_logits(x, mask)
+        count = visual_mask.shape[-1]
+        scores = logits[:, :, -text_count:, visual_start:visual_start + count].float()
+        valid = visual_mask[:, None, None, :].bool()
+        scores = scores.masked_fill(~valid, float('-inf'))
+        scores = torch.where(valid.any(-1, keepdim=True), scores, torch.zeros_like(scores))
+        readout = scores.softmax(-1).masked_fill(~valid, 0.).mean(dim=(1, 2))
+        return self.aggregate_logits(logits, values, key_mask), readout
+
     def aggregate(self, attn, v, valid_rows=None):
         batch_size, heads, seq_len, head_dim = v.shape
         x = (attn @ v).transpose(1, 2).reshape(batch_size, seq_len, heads * head_dim)
@@ -136,6 +151,57 @@ class TrajectoryAttentionBlock(nn.Module):
 
     def _mlp(self, x):
         return self.mlp(self.norm2(x))
+
+    def forward_text_concat(self, x, thw, pt_mask, text,
+                            temporal_text_tokens=1, spatial_text_tokens=1):
+        """Independent text concatenation on both axes; keep original residuals.
+
+        Both axes receive the ORIGINAL class text, not the updated temporal
+        text output. Text/CLS tokens are never values in the spatial readout.
+        """
+        if self.pt_attention != 'divided_space_time':
+            raise ValueError('Text concatenation requires divided_space_time.')
+        t, h, w = thw
+        b, _, d = x.shape
+        n = h * w
+        cls = int(self.cfg.MODEL.USE_CLS_TOKEN)
+        patches = x[:, cls:]
+        visual_mask = pt_mask[:, cls:].reshape(b, n, t)
+        temporal = patches.reshape(b * n, t, d)
+        temporal_text = text[:, None, None, :].expand(b, n, temporal_text_tokens, d)
+        temporal = torch.cat((temporal, temporal_text.reshape(b * n, temporal_text_tokens, d)), 1)
+        tm = torch.cat((visual_mask.reshape(b * n, t),
+                        pt_mask.new_ones(b * n, temporal_text_tokens)), 1)
+        residual = self.temporal_attn(self.temporal_norm1(temporal), tm)[:, :t]
+        residual = self.drop_path(residual).reshape(b, n * t, d)
+        xt = patches + self.temporal_fc(residual)
+
+        spatial = xt.reshape(b, n, t, d).transpose(1, 2).reshape(b * t, n, d)
+        vm = visual_mask.transpose(1, 2).reshape(b * t, n)
+        sm = vm
+        if cls:
+            initial_cls = x[:, :1]
+            spatial_cls = initial_cls[:, None].expand(b, t, 1, d).reshape(b * t, 1, d)
+            spatial = torch.cat((spatial_cls, spatial), 1)
+            cm = pt_mask[:, :1, None].expand(b, t, 1).reshape(b * t, 1)
+            sm = torch.cat((cm, sm), 1)
+        spatial_text = text[:, None, None, :].expand(b, t, spatial_text_tokens, d)
+        spatial = torch.cat((spatial, spatial_text.reshape(b * t, spatial_text_tokens, d)), 1)
+        sm = torch.cat((sm, pt_mask.new_ones(b * t, spatial_text_tokens)), 1)
+        residual, readout = self.attn.forward_with_text_readout(
+            self.norm1(spatial), sm, vm, cls, spatial_text_tokens)
+        residual = self.drop_path(residual[:, :cls + n])
+        if cls:
+            cls_residual = residual[:, :1].reshape(b, t, 1, d).mean(1)
+        residual = residual[:, cls:].reshape(b, t, n, d).transpose(1, 2).reshape(b, n * t, d)
+        x = xt + residual
+        if cls:
+            x = torch.cat((initial_cls + cls_residual, x), 1)
+        mlp = (checkpoint(self._mlp, x, use_reentrant=False)
+               if self.checkpoint_mlp and self.training and torch.is_grad_enabled()
+               else self._mlp(x))
+        x = x + self.drop_path(mlp)
+        return x, readout.reshape(b, t, n)
 
     def forward(self, x, thw, pt_mask, with_cls_token=True,
                 temporal_state=None, temporal_bias=None, spatial_bias=None):

@@ -16,7 +16,7 @@ from tools.few_shot_multilabel import compute_query_partial_q2s_loss
 from trokens.config.defaults import get_cfg
 
 
-@pytest.mark.parametrize("config_name", ["sav.yaml", "sav_label_pre_temporal.yaml",
+@pytest.mark.parametrize("config_name", ["sav_label_pre_temporal.yaml",
                                        "sav_label_pre_temporal_parallel.yaml",
                                        "sav_label_pre_temporal_fast.yaml",
                                        "sav_label_pre_temporal_post_readout.yaml",

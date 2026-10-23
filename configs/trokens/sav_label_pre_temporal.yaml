@@ -5,6 +5,18 @@ _BASE_: sav.yaml
 # v30: unchanged encoding; reuse early weights for main Post pooling; retain Post rho.
 OUTPUT_DIR: output/sav_label_pre_temporal_relation_decision_reuse_pre_weights_post_rho_st_bias_cls
 FEW_SHOT:
+  TEXT_CONCAT_ST:
+    ENABLE: False
+    # Pin inactive concat settings so historical merged configs stay identical.
+    CLASS_CHUNK_SIZE: 2
+    VIDEO_CHUNK_SIZE: 4
+    ACTIVATION_CHECKPOINT: True
+    MLP_CHECKPOINT: False
+    READOUT_CHECKPOINT: False
+  SUPPORT_TEXT_FUSION:
+    ENABLE: True
+  POT_ROUTE:
+    ENABLE: True
   # Restore the original global classification supervision using the existing
   # conditional encodings; no extra neutral encoder pass.
   CLASS_LOSS_LAMBDA: 1.0
@@ -22,5 +34,16 @@ FEW_SHOT:
     MLP_CHECKPOINT: False
     READOUT_CHECKPOINT: False
   QUERY_CLASS_MATCHABILITY:
+    # Pin the historical five-term objective; do not inherit concat ablations.
+    BASE_ONLY_LOSS_ENABLE: False
+    DUAL_LOGIT_LOSS_ENABLE: True
+    BASE_LOGIT_LOSS_WEIGHT: 0.60
+    VERIFIED_LOGIT_LOSS_WEIGHT: 0.40
+    ABSOLUTE_MASS_TRANSPORT_STRENGTH: 1.0
+    QUALITY_ENABLE: True
+    UNIQUENESS_ENABLE: True
     LEARNED_VERIFIER:
+      QUALITY_RELATION_STRENGTH: 1.0
+      SEMANTIC_MIL_WEIGHT: 0.05
+      RELATION_MIL_WEIGHT: 0.05
       ACTIVATION_CHECKPOINT: True

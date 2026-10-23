@@ -4,11 +4,13 @@ Uses the actual Pointformer constructor/forward, motion modules, losses and
 optimizer. By default, frozen towers/text use synthetic inputs. --real-data
 uses locally cached towers and SAV episodes (no downloads). Run from the repo
 root, selecting idle GPUs via CUDA_VISIBLE_DEVICES; torchrun enables DDP.
+Also supports TEXT_CONCAT_ST v1 with both judgments disabled.
 """
 
 import argparse
 import json
 import os
+import random
 import sys
 import time
 from contextlib import nullcontext
@@ -67,33 +69,38 @@ def main():
         dist.init_process_group("nccl", timeout=timedelta(seconds=180))
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    random.seed(args.seed)
     torch.autograd.set_detect_anomaly(args.anomaly)
     cfg = get_cfg()
     cfg.merge_from_file(args.cfg)
     cfg.NUM_GPUS = world
     cfg.RNG_SEED = args.seed
     cfg.SOLVER.GRAD_ACCUM_STEPS = args.grad_accum
+    concat = bool(cfg.FEW_SHOT.TEXT_CONCAT_ST.ENABLE)
+    encoder_cfg = cfg.FEW_SHOT.TEXT_CONCAT_ST if concat else cfg.FEW_SHOT.LABEL_PRE_TEMPORAL
+    if concat and args.batch_raw_quality:
+        parser.error('Text concat has no early quality reader.')
     if args.video_chunk is not None:
-        cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.VIDEO_CHUNK_SIZE = args.video_chunk
+        encoder_cfg.VIDEO_CHUNK_SIZE = args.video_chunk
     if args.class_chunk is not None:
-        cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.CLASS_CHUNK_SIZE = args.class_chunk
+        encoder_cfg.CLASS_CHUNK_SIZE = args.class_chunk
     if args.batch_raw_quality:
         cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.BATCH_RAW_QUALITY = True
     if args.no_checkpoint or args.no_encoder_checkpoint:
-        cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ACTIVATION_CHECKPOINT = False
+        encoder_cfg.ACTIVATION_CHECKPOINT = False
     if args.no_checkpoint or args.no_verifier_checkpoint:
         cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER.ACTIVATION_CHECKPOINT = False
     if args.no_checkpoint:
-        cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.MLP_CHECKPOINT = False
-        cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.READOUT_CHECKPOINT = False
+        encoder_cfg.MLP_CHECKPOINT = False
+        encoder_cfg.READOUT_CHECKPOINT = False
     if args.mlp_checkpoint:
-        cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ACTIVATION_CHECKPOINT = False
-        cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.MLP_CHECKPOINT = True
+        encoder_cfg.ACTIVATION_CHECKPOINT = False
+        encoder_cfg.MLP_CHECKPOINT = True
     if args.readout_checkpoint:
-        cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ACTIVATION_CHECKPOINT = False
-        cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.READOUT_CHECKPOINT = True
-    if not cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE:
-        parser.error("This smoke requires LABEL_PRE_TEMPORAL.ENABLE=True.")
+        encoder_cfg.ACTIVATION_CHECKPOINT = False
+        encoder_cfg.READOUT_CHECKPOINT = True
+    if not (cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE or concat):
+        parser.error("This smoke requires LABEL_PRE_TEMPORAL or TEXT_CONCAT_ST.")
     if args.real_data:
         probe = Pointformer.__new__(Pointformer)
         for filename in ("dinov2_vitl14_reg4_pretrain.pth",
@@ -142,7 +149,6 @@ def main():
     real_loader = None
     if args.real_data:
         from trokens.datasets.loader import construct_loader
-        cfg.DATA_LOADER.NUM_WORKERS = 0
         real_loader = iter(construct_loader(cfg, "train"))
     optimizer = construct_optimizer(model, cfg)
     # Match the actual epoch-0 learning-rate warmup as well as verifier warmup.
@@ -150,12 +156,43 @@ def main():
     dtype = getattr(torch, args.dtype)
     scaler = torch.cuda.amp.GradScaler(enabled=dtype == torch.float16)
     required = ("blocks.0.temporal_attn.qkv.weight", "blocks.0.attn.qkv.weight",
-                "hod_motion_module.fc2.c_fc.weight", "cross_motion_module.fc2.c_fc.weight",
-                "query_evidence_verifier.semantic_quality.projection.weight",
-                "query_evidence_verifier.metric_temperature_raw", "query_evidence_verifier.metric_scale_raw")
-    learned_routing = core.label_pre_temporal.scoring == "projected_cosine"
-    required += tuple("query_evidence_verifier.semantic_quality." + name
-                      for name, _ in core.query_evidence_verifier.semantic_quality.named_parameters())
+                "hod_motion_module.fc2.c_fc.weight", "cross_motion_module.fc2.c_fc.weight")
+    learned_routing = not concat and core.label_pre_temporal.scoring == "projected_cosine"
+    if concat:
+        assert core.label_pre_temporal is None and core.query_evidence_verifier is None
+        contract = dict(
+            architecture='text_concat_st',
+            architecture_signature=core.text_concat_st.architecture_signature.tolist(),
+            main_readout='spatial_text_attention', quality_enabled=False, uniqueness_enabled=False,
+            video_chunk=encoder_cfg.VIDEO_CHUNK_SIZE, class_chunk=encoder_cfg.CLASS_CHUNK_SIZE,
+            checkpoint=encoder_cfg.ACTIVATION_CHECKPOINT,
+            mlp_checkpoint=encoder_cfg.MLP_CHECKPOINT,
+            readout_checkpoint=encoder_cfg.READOUT_CHECKPOINT,
+            base_only_loss=cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BASE_ONLY_LOSS_ENABLE,
+            loader_workers=cfg.DATA_LOADER.NUM_WORKERS if args.real_data else 0,
+        )
+    else:
+        required += ("query_evidence_verifier.semantic_quality.projection.weight",
+                     "query_evidence_verifier.metric_temperature_raw", "query_evidence_verifier.metric_scale_raw")
+        required += tuple("query_evidence_verifier.semantic_quality." + name
+                          for name, _ in core.query_evidence_verifier.semantic_quality.named_parameters())
+        contract = dict(
+            routing_version=int(core.label_pre_temporal.architecture_version.item()),
+            routing_scoring=core.label_pre_temporal.scoring,
+            routing_parameters=sum(p.numel() for p in core.label_pre_temporal.parameters()),
+            main_readout="reuse_early_weights",
+            temporal_bias_scale=core.label_pre_temporal.temporal_bias_scale,
+            spatial_bias_scale=core.label_pre_temporal.spatial_bias_scale,
+            video_chunk=core.label_pre_temporal.video_chunk_size,
+            class_chunk=core.label_pre_temporal.class_chunk_size,
+            batch_raw_quality=core.label_pre_temporal.batch_raw_quality,
+            checkpoint=core.label_pre_temporal.activation_checkpoint,
+            mlp_checkpoint=core.blocks[0].checkpoint_mlp,
+            readout_checkpoint=core.label_pre_temporal.readout_checkpoint,
+            verifier_checkpoint=core.query_evidence_verifier.activation_checkpoint,
+            quality_mode=core.query_evidence_verifier.quality_mode,
+            verifier_version=int(core.query_evidence_verifier.architecture_version.item()),
+        )
     watched_parameter = "label_pre_temporal.query.weight" if learned_routing else required[0]
     if learned_routing:
         required += ("label_pre_temporal.query.weight", "label_pre_temporal.key.weight")
@@ -189,6 +226,8 @@ def main():
             with sync:
                 with torch.autocast("cuda", dtype=dtype):
                     output = model(inputs)
+                    if concat:
+                        assert torch.equal(output['query_partial_q2s_logits'], output['query_partial_q2s_base_logits'])
                     q2s_loss, _, _ = compute_query_partial_q2s_loss(
                         output["query_partial_q2s_logits"], targets, output, cfg)
                     cls_loss = q2s_loss.new_zeros(())
@@ -244,24 +283,10 @@ def main():
                         raise RuntimeError(f"DDP parameters diverged: {name}")
             del replica
         print(json.dumps(dict(
+            **contract,
             synthetic=not args.real_data, excludes_frozen_backbone=not args.real_data, includes_motion=True,
             rank=rank, world_size=world, grad_accum=args.grad_accum,
-            routing_version=int(core.label_pre_temporal.architecture_version.item()),
-            routing_scoring=core.label_pre_temporal.scoring,
-            routing_parameters=sum(p.numel() for p in core.label_pre_temporal.parameters()),
-            main_readout="reuse_early_weights",
-            temporal_bias_scale=core.label_pre_temporal.temporal_bias_scale,
-            spatial_bias_scale=core.label_pre_temporal.spatial_bias_scale,
-            video_chunk=core.label_pre_temporal.video_chunk_size,
-            class_chunk=core.label_pre_temporal.class_chunk_size,
-            batch_raw_quality=core.label_pre_temporal.batch_raw_quality,
-            checkpoint=core.label_pre_temporal.activation_checkpoint,
-            mlp_checkpoint=core.blocks[0].checkpoint_mlp,
-            readout_checkpoint=core.label_pre_temporal.readout_checkpoint,
-            verifier_checkpoint=core.query_evidence_verifier.activation_checkpoint,
-            quality_mode=core.query_evidence_verifier.quality_mode,
-            verifier_version=int(core.query_evidence_verifier.architecture_version.item()),
-            transport_progress=core.query_evidence_verifier.transport_progress,
+            transport_progress=(core.query_evidence_verifier.transport_progress if not concat else None),
             lr=optimizer.param_groups[0]["lr"],
             shape=[b, k, t, n, d], step=step, attempt=attempt, dtype=args.dtype,
             loss=float(loss.detach()), cls_loss=float(cls_loss.detach()), q2s_loss=float(q2s_loss.detach()),

@@ -242,7 +242,11 @@ def compute_query_partial_q2s_loss(
     before BCE, so enabling the auxiliary branch does not silently change the
     logit calibration of the existing objective.
 
-    Returns ``(loss, verified_logits_scaled, diagnostics)``.  Diagnostics are
+    ``BASE_ONLY_LOSS_ENABLE`` instead supervises only the unpenalized base
+    logits, skipping final BCE and both MIL losses. It returns scaled base
+    logits for the training metric; evaluation output is unchanged.
+
+    Returns ``(loss, training_logits_scaled, diagnostics)``.  Diagnostics are
     detached scalar tensors suitable for the existing all-reduce/logging path.
     This helper is intentionally training-only; evaluation should continue to
     use the verified logits for its metric definition.
@@ -279,6 +283,26 @@ def compute_query_partial_q2s_loss(
         known = torch.isfinite(labels) & (labels >= 0) & (labels <= 1)
         return (F.binary_cross_entropy_with_logits(logits.float()[known], labels[known])
                 if known.any() else logits.sum() * 0.0)
+
+    if bool(getattr(match_cfg, "BASE_ONLY_LOSS_ENABLE", False)):
+        judgments = resolve_query_judgments(match_cfg)
+        if (judgments.quality or judgments.uniqueness
+                or bool(getattr(match_cfg, "DUAL_LOGIT_LOSS_ENABLE", False))):
+            raise ValueError("BASE_ONLY_LOSS_ENABLE requires both judgments and dual-logit loss OFF.")
+        if (float(match_cfg.BASE_LOGIT_LOSS_WEIGHT) != 1.0
+                or float(match_cfg.VERIFIED_LOGIT_LOSS_WEIGHT) != 0.0):
+            raise ValueError("Base-only loss requires base/verified weights 1/0.")
+        base = (few_shot_aux.get("query_partial_q2s_base_logits")
+                if isinstance(few_shot_aux, dict) else None)
+        if not isinstance(base, torch.Tensor) or base.shape != q2s_labels.shape:
+            raise ValueError("Base-only loss requires base logits matching q2s_labels.")
+        base_scaled = _sanitize(base)
+        base_loss = supervised_bce(base_scaled)
+        # Do not evaluate a duplicate final BCE or either verifier MIL loss.
+        return base_loss, base_scaled, {
+            "q2s_base_loss": base_loss.detach(),
+            "q2s_verified_loss": base_loss.new_zeros(()),
+        }
 
     verified_scaled = _sanitize(verified_logits)
     verified_loss = supervised_bce(verified_scaled)

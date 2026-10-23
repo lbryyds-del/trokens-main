@@ -16,6 +16,8 @@ from trokens.models.attention import TrajectoryAttentionBlock
 from trokens.config.query_judgments import resolve_query_judgments
 from trokens.models.query_evidence_verifier import QueryEvidenceVerifier, build_query_q2s_aux
 from trokens.models.label_conditioned_routing import LabelPreTemporalRouting, label_conditioned_episode
+from trokens.models.text_concat_conditioning import TextConcatST, text_concat_episode
+from trokens.models.frozen_text_cache import FrozenLabelTextCache
 from trokens.models.branches.motion_blocks import (
     CrossMotionModule,
     HODMotionModule
@@ -82,6 +84,7 @@ class Pointformer(nn.Module):
         self.head_act = cfg.MF.HEAD_ACT
         self.cfg = cfg
         self.use_label_pre_temporal = bool(cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE)
+        self.use_text_concat_st = bool(cfg.FEW_SHOT.TEXT_CONCAT_ST.ENABLE)
         self.pot_route_cfg = cfg.FEW_SHOT.POT_ROUTE
         self.support_text_fusion_cfg = getattr(
             cfg.FEW_SHOT,
@@ -105,7 +108,7 @@ class Pointformer(nn.Module):
             support_text_fusion_requested and self.use_frame_softmax_route
         )
         self.use_query_partial_q2s = (
-            self.use_frame_softmax_route
+            (self.use_frame_softmax_route or self.use_text_concat_st)
             and bool(getattr(self.pot_route_cfg, "QUERY_PARTIAL_ENABLE", False))
         )
         if (
@@ -120,6 +123,7 @@ class Pointformer(nn.Module):
             self.is_multilabel_few_shot
             and bool(getattr(self.pot_route_cfg, "QUERY_PARTIAL_ENABLE", False))
             and not self.pot_route_cfg.ENABLE
+            and not self.use_text_concat_st
         ):
             raise NotImplementedError(
                 "QUERY_PARTIAL_ENABLE currently requires POT_ROUTE.ENABLE."
@@ -129,7 +133,7 @@ class Pointformer(nn.Module):
                 "SUPPORT_TEXT_FUSION currently requires the enabled "
                 "frame_softmax text route."
             )
-        self.use_label_text_features = self.use_frame_softmax_route
+        self.use_label_text_features = self.use_frame_softmax_route or self.use_text_concat_st
         self.num_patches = (224 // self.patch_size) ** 2
         if cfg.POINT_INFO.ENABLE:
             self.point_grid_size = self.get_point_grid_size()
@@ -244,7 +248,7 @@ class Pointformer(nn.Module):
                 self.text_to_model_proj = nn.Identity()
             else:
                 self.text_to_model_proj = nn.Linear(self.text_feature_dim, self.embed_dim)
-            if self.use_frame_softmax_route:
+            if self.use_label_text_features:
                 self.atomic_label_names = self._load_atomic_label_names()
                 self.atomic_label_prompt_groups = self._load_label_prompt_groups()
 
@@ -309,6 +313,35 @@ class Pointformer(nn.Module):
         # Build the evidence heads after the main model initialization.
         self._init_query_evidence_verifier()
         self._init_label_pre_temporal()
+        self._init_text_concat_st()
+
+    def _init_text_concat_st(self):
+        self.text_concat_st = None
+        if not self.use_text_concat_st:
+            return
+        judgments = resolve_query_judgments(self.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY)
+        if judgments.quality or judgments.uniqueness:
+            raise ValueError("TEXT_CONCAT_ST version 1 requires quality m and uniqueness rho OFF.")
+        if (self.use_label_pre_temporal or self.pot_route_cfg.ENABLE
+                or self.cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.ENABLE):
+            raise ValueError("TEXT_CONCAT_ST excludes early routing and Support/text fusion.")
+        if (not self.use_query_partial_q2s or not self.is_multilabel_few_shot
+                or self.feat_extractor_type != 'dinotxt_vitl14_reg4'
+                or self.depth != 1 or self.cfg.MF.PT_ATTENTION != 'divided_space_time'
+                or self.cfg.MODEL.ADAPOOLING.ENABLE or not self.cfg.POINT_INFO.ENABLE
+                or not self.cfg.FEW_SHOT.USE_MODEL or self.cfg.MODEL.TRAIN_BACKBONE):
+            raise ValueError("TEXT_CONCAT_ST requires frozen DinoTxt, tracked points, "
+                             "multilabel few-shot matching, depth=1 and no adaptive pooling.")
+        class_weight = float(self.cfg.FEW_SHOT.CLASS_LOSS_LAMBDA)
+        if not np.isfinite(class_weight) or class_weight < 0:
+            raise ValueError('CLASS_LOSS_LAMBDA must be finite and non-negative.')
+        self.text_concat_st = TextConcatST(self.cfg.FEW_SHOT.TEXT_CONCAT_ST,
+                                          global_classifier=class_weight > 0)
+        self.blocks[0].checkpoint_mlp = self.text_concat_st.mlp_checkpoint
+        self.head.requires_grad_(class_weight > 0)
+        self.pre_logits.requires_grad_(class_weight > 0)
+        if hasattr(self, 'agg_cls_token'):
+            self.agg_cls_token.requires_grad_(False)
 
     def _init_label_pre_temporal(self):
         self.label_pre_temporal = None
@@ -646,16 +679,26 @@ class Pointformer(nn.Module):
         group_sizes = [len(group) for group in prompt_groups]
         text_device = next(self.dinotxt_text_model.parameters()).device
         self.dinotxt_text_model.eval()
-        with torch.no_grad():
-            tokenized = self.dinotxt_tokenizer.tokenize(flat_prompts).to(
-                text_device,
-                non_blocking=True,
-            )
-            flat_text_features = self.dinotxt_text_model(tokenized).float()
-            flat_text_features = flat_text_features[
-                :,
-                flat_text_features.shape[-1] // 2 :,
-            ]
+        use_cache = (getattr(self, 'use_text_concat_st', False)
+                     and getattr(self.cfg.FEW_SHOT.TEXT_CONCAT_ST, 'CACHE_FROZEN_TEXT', False))
+        if use_cache:
+            if not hasattr(self, '_frozen_label_text_cache'):
+                self._frozen_label_text_cache = FrozenLabelTextCache()
+            flat_text_features = self._frozen_label_text_cache.encode(
+                self.dinotxt_text_model, self.dinotxt_tokenizer, prompt_groups)
+        else:
+            if hasattr(self, '_frozen_label_text_cache'):
+                self._frozen_label_text_cache.clear()
+            with torch.no_grad():
+                tokenized = self.dinotxt_tokenizer.tokenize(flat_prompts).to(
+                    text_device,
+                    non_blocking=True,
+                )
+                flat_text_features = self.dinotxt_text_model(tokenized).float()
+                flat_text_features = flat_text_features[
+                    :,
+                    flat_text_features.shape[-1] // 2 :,
+                ]
         flat_text_features = self.text_to_model_proj(flat_text_features)
         flat_text_features = F.normalize(flat_text_features, dim=-1)
 
@@ -1865,6 +1908,8 @@ class Pointformer(nn.Module):
             inter_feat = torch.zeros_like(reference_feat)
         fused_feat = app_feat + intra_feat + inter_feat
 
+        if getattr(self, "use_text_concat_st", False):
+            return text_concat_episode(self, fused_feat, metadata)
         if getattr(self, "use_label_pre_temporal", False):
             return label_conditioned_episode(self, fused_feat, matchability_evidence_tokens, metadata)
 

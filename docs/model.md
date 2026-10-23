@@ -1,35 +1,41 @@
 # 默认模型与数据集配置
 
-代码基准：`a5134b8a69e49a2c4bc3c5ace2bd58e40cc957c3`。
+当前 SAV 为[双轴单文本拼接第 1 版](text_concat_st.md)（2026-10-23）。
+历史前置对照仍保留在 `sav_label_pre_temporal*.yaml`；TinyVIRAT 未改结构。
 
 ## 数据流
 
 1. 冻结的 DinoTxt 提供视觉和类别文本特征，读取已有轨迹缓存。
-2. 位置编码、CrossMotion、HoD 和 Pointformer 生成 Post 特征。
-3. 类别文本构造 Support 帧原型；文本与 Support 视觉原型融合后，路由 Query。
-4. Raw 特征提供语义质量 `m`，Post 特征与正负 Support 的度量提供独特性 `rho`。
-5. `g = m * rho` 在双向 BiMHM 的帧匹配归约前控制匹配质量，得到 Query 类别分数。
+2. 保留位置编码、CrossMotion、HoD；Support、Query 按每个候选类使用相同原始文本。
+3. 时间轴拼 1 个文本，空间轴拼 1 个文本，进行原有串行时空 self-attention。
+4. 复用空间 self-attention 的文本→视觉权重，聚合最终 Post 视觉 patch；正 Support 类内平均。
+5. 关闭质量 `m`、独特性 `rho` 及 transport，直接用原 BiMHM 得到 Query 类别分数。
 
 模型只使用 Support 标签和 episode 候选类别。Query 真值用于损失与指标计算。
 
 | 文件 | 职责 |
 | --- | --- |
 | `trokens/models/pointformer.py` | 特征提取、运动融合、时空注意力与类别路由 |
-| `trokens/models/query_evidence_verifier.py` | 质量、独特性和证据门控 |
+| `trokens/models/text_concat_conditioning.py` | 当前双轴文本拼接、空间聚合、Support/Query 匹配 |
+| `trokens/models/query_evidence_verifier.py` | 历史对照及其他数据集的质量、独特性判断 |
 | `trokens/models/query_matching.py` | Support 参考、帧状态质量、双向匹配 |
 | `tools/few_shot_multilabel.py` | 多标签监督、损失和诊断导出 |
 
 ## SAV 配置
 
-入口为 `configs/trokens/sav.yaml`，默认输出为 `output/sav`。
+入口为 `configs/trokens/sav.yaml`，默认输出为 `output/sav_text_concat_t1_s1_attention_readout_m_rho_off`。
+原 32 份版本保留为 `configs/trokens/sav_text_concat_s32.yaml`，两种 token 数量的 checkpoint 不可混用。
 
 - 训练协议：5-way、1-shot，每类 6 个训练 Query；每轮 2000 个训练 episode，10000 个测试 episode，20 轮训练。
-- 轨迹：每段 8 帧、256 个点，空间路由采用 `QUERY_MASK_MODE: all`；运动和证据模块仍使用真实可见性。
-- 路由：`FRAME_SOFTMAX_TAU: 0.04`，Support 文本与视觉融合保持开启。
-- 消融：`QUALITY_ENABLE` 和 `UNIQUENESS_ENABLE` 独立控制两个判断。
-- 监督：基础匹配损失权重 0.60，证据门控后的匹配损失权重 0.40，两个 MIL 损失权重各为 0.05。
+- 轨迹：每段 8 帧、256 个点，空间读出采用 `QUERY_MASK_MODE: all`；运动仍使用真实可见性。
+- 编码：启用 `TEXT_CONCAT_ST`，关闭旧前置路由及 Support/text 融合，不额外计算相似度。
+- 消融：本版 `QUALITY_ENABLE=False`、`UNIQUENESS_ENABLE=False`，不构建两个判断头。
+- 监督：全局分类 BCE + 匹配 BCE；保留的 `.60/.40` 匹配项因 logits 相同而等价于一份 BCE；两个 MIL 停用。
 - 优化：AdamW、cosine，学习率 `1e-4`，5 轮 warmup，梯度累积 2 步。
-- 显存选项：`QUERY_CHUNK_SIZE`、`AMP_ENABLE` 和 `ACTIVATION_CHECKPOINT` 调整执行方式，不引入额外模型分支。
+- 显存选项：`TEXT_CONCAT_ST` 内的类别/视频分块和完整块 activation checkpoint 调整执行方式。
+- 提速：缓存冻结文本塔输出，保留投影和提示词平均逻辑；默认分块 2×4、完整块 checkpoint 不变。
+  可选 `sav_text_concat_s1_fast.yaml` 使用 5×4 分块；[GPU 3 短测](text_concat_speed_gpu3.md)
+  约减少 5% 单文本版本的计算耗时，峰值 allocated 从 10.15 增至 12.09 GiB。
 
 每个进程每步处理一个 episode；有效全局 episode 数为进程数乘以梯度累积步数。通用 `TRAIN/TEST.BATCH_SIZE` 不控制这里的 episode 大小。
 
@@ -46,7 +52,8 @@ SAV YAML 已移除旧评分阈值、Top-K 校准、旧模型选择项、关闭�
 
 实际 GPU 数由启动参数决定，训练前按实验协议设置 `GRAD_ACCUM_STEPS`。
 
-默认路径保留原参数名及检查点结构标识，可以加载对应结构的已有权重。旧启发式或其他结构的权重不能用于直接续训或评估；检查点加载会明确拒绝不完整或不匹配的证据头。
+当前路径保存结构及文本数量签名。仅可加载同结构的完整 checkpoint；不能用旧前置路由
+checkpoint 直接续训或评估。新实验应从头训练。
 
 ## TinyVIRAT 配置
 

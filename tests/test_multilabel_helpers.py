@@ -1,6 +1,7 @@
 """Tests for multi-label few-shot helpers shared across routing modes."""
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 import torch
@@ -128,3 +129,72 @@ def test_single_q2s_loss_keeps_previous_verified_only_behavior():
     assert torch.allclose(loss, expected)
     assert torch.equal(scaled, verified / 2.0)
     assert set(diagnostics) == {"q2s_verified_loss"}
+
+
+@pytest.mark.parametrize('all_unknown', [False, True])
+def test_base_only_loss_skips_verified_and_mil_and_preserves_unknown_mask(all_unknown, monkeypatch):
+    from trokens.config.defaults import get_cfg
+    import tools.few_shot_multilabel as helper
+    cfg = get_cfg()
+    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav.yaml'))
+    cfg.SOLVER.TEMPRATURE = .73
+    base = torch.randn(2, 3, requires_grad=True)
+    verified = torch.randn(2, 3, requires_grad=True)
+    quality = torch.randn(2, 3, 2, requires_grad=True)
+    relation = torch.randn(2, 3, 2, requires_grad=True)
+    labels = torch.tensor([[1., 0., -1.], [float('nan'), 1., 0.]])
+    if all_unknown:
+        labels.fill_(-1.)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Neither verifier MIL should be evaluated')
+    monkeypatch.setattr(helper, 'compute_learned_evidence_mil_loss', forbidden)
+    calls = []
+    original_bce = F.binary_cross_entropy_with_logits
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original_bce(*args, **kwargs)
+    monkeypatch.setattr(helper.F, 'binary_cross_entropy_with_logits', counted)
+    aux = dict(query_partial_q2s_base_logits=base, query_quality_logits=quality,
+               query_relation_logits=relation)
+    loss, scaled, diagnostics = compute_query_partial_q2s_loss(verified, labels, aux, cfg)
+    known = torch.isfinite(labels) & (labels >= 0) & (labels <= 1)
+    expected = (original_bce(base[known] / .73, labels[known]) if known.any()
+                else base.sum() * 0.)
+    torch.testing.assert_close(loss, expected)
+    torch.testing.assert_close(scaled, base / .73)
+    assert len(calls) == (0 if all_unknown else 1)
+    assert diagnostics['q2s_verified_loss'].item() == 0.
+    assert not any('mil' in key for key in diagnostics)
+    loss.backward()
+    assert verified.grad is quality.grad is relation.grad is None
+    assert torch.isfinite(base.grad).all() and base.grad[~known].eq(0).all()
+
+
+def test_base_only_rejects_missing_base_and_contradictory_dual_mode():
+    from trokens.config.defaults import get_cfg
+    cfg = get_cfg()
+    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav.yaml'))
+    with pytest.raises(ValueError, match='requires base logits'):
+        compute_query_partial_q2s_loss(torch.zeros(1, 2), torch.zeros(1, 2), {}, cfg)
+    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DUAL_LOGIT_LOSS_ENABLE = True
+    with pytest.raises(ValueError, match='dual-logit loss OFF'):
+        compute_query_partial_q2s_loss(torch.zeros(1, 2), torch.zeros(1, 2), {}, cfg)
+
+
+def test_base_only_equals_previous_mixed_loss_when_base_is_final():
+    from trokens.config.defaults import get_cfg
+    cfg = get_cfg()
+    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav.yaml'))
+    logits = torch.randn(2, 3, requires_grad=True)
+    labels = torch.tensor([[1., 0., -1.], [0., 1., 0.]])
+    aux = dict(query_partial_q2s_base_logits=logits)
+    clean = compute_query_partial_q2s_loss(logits, labels, aux, cfg)[0]
+    old = cfg.clone()
+    match = old.FEW_SHOT.QUERY_CLASS_MATCHABILITY
+    match.BASE_ONLY_LOSS_ENABLE = False
+    match.DUAL_LOGIT_LOSS_ENABLE = True
+    match.BASE_LOGIT_LOSS_WEIGHT, match.VERIFIED_LOGIT_LOSS_WEIGHT = .6, .4
+    mixed = compute_query_partial_q2s_loss(logits, labels, aux, old)[0]
+    torch.testing.assert_close(clean, mixed)
+    torch.testing.assert_close(torch.autograd.grad(clean, logits, retain_graph=True)[0],
+                               torch.autograd.grad(mixed, logits)[0])

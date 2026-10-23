@@ -22,7 +22,6 @@ def test_early_configs_inherit_new_quality_without_changing_routing_contract():
     root = Path(__file__).resolve().parents[1]
     paths = sorted((root / "configs/trokens").glob("sav_label_pre_temporal*.yaml"))
     assert len(paths) == 5
-    paths.append(root / "configs/trokens/sav.yaml")
     for path in paths:
         cfg = get_cfg()
         cfg.merge_from_file(str(path))
@@ -37,7 +36,7 @@ def test_early_configs_inherit_new_quality_without_changing_routing_contract():
         assert "reuse_pre_weights" in cfg.OUTPUT_DIR
         assert "POST_SUPPORT_READOUT" not in early
         assert not cfg.TRAIN.AUTO_RESUME and not cfg.TRAIN.CHECKPOINT_FILE_PATH
-        if path.stem == "sav" or path.stem.endswith("cosine"):
+        if path.stem.endswith("cosine"):
             assert early.SCORING == "cosine"
             assert (early.CLASS_CHUNK_SIZE, early.VIDEO_CHUNK_SIZE) == (5, 8)
             assert early.BATCH_RAW_QUALITY and early.MLP_CHECKPOINT and early.READOUT_CHECKPOINT

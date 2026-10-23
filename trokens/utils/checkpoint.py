@@ -331,8 +331,31 @@ def inflate_weight(state_dict_2d, state_dict_3d):
     return state_dict_inflated
 
 
+def validate_text_concat_checkpoint(model, state_dict):
+    """Never silently load a pre-routing checkpoint into concatenation v1."""
+    module = getattr(model, 'text_concat_st', None)
+    prefix = 'text_concat_st.'
+    present = any(name.startswith(prefix) for name in state_dict)
+    if module is None:
+        if present:
+            raise ValueError('Text-concat checkpoint requires TEXT_CONCAT_ST.ENABLE.')
+        return
+    signature = state_dict.get(prefix + 'architecture_signature')
+    expected_signature = module.architecture_signature
+    if (signature is None or signature.shape != expected_signature.shape
+            or not torch.equal(signature.cpu(), expected_signature.cpu())):
+        raise ValueError('Text-concat checkpoint architecture/token-count mismatch; start a fresh run.')
+    expected = {name: value for name, value in model.named_parameters() if value.requires_grad}
+    missing = [name for name, value in expected.items()
+               if name not in state_dict or state_dict[name].shape != value.shape]
+    if missing:
+        raise ValueError('Incomplete Text-concat checkpoint: ' + ', '.join(missing[:6]))
+    model._text_concat_st_checkpoint_loaded = True
+
+
 def validate_label_pre_temporal_checkpoint(model, state_dict, allow_init=False):
     """Guard routing/loss semantics; allow explicit compatible initialization."""
+    validate_text_concat_checkpoint(model, state_dict)
     module = getattr(model, "label_pre_temporal", None)
     prefix = "label_pre_temporal."
     present = any(name.startswith(prefix) for name in state_dict)
@@ -850,6 +873,9 @@ def load_train_checkpoint(cfg, model, optimizer, scaler=None):
 
     if cfg.TRAIN.VAL_ONLY:
         unwrapped = model.module if hasattr(model, "module") else model
+        if (getattr(unwrapped, 'text_concat_st', None) is not None
+                and not getattr(unwrapped, '_text_concat_st_checkpoint_loaded', False)):
+            raise ValueError('VAL_ONLY requires a complete Text-concat checkpoint.')
         if (getattr(unwrapped, "label_pre_temporal", None) is not None
                 and not getattr(unwrapped, "_label_pre_temporal_checkpoint_loaded", False)):
             raise ValueError("VAL_ONLY requires a complete Label-pre-temporal checkpoint.")

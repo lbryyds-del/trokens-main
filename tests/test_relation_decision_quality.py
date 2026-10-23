@@ -16,7 +16,7 @@ def _new(**kwargs):
     return _model(quality_mode="relation_decision", **kwargs)
 
 
-def test_sav_keeps_relation_decision_quality_and_preserves_training_contract():
+def test_historical_sav_keeps_relation_decision_quality_and_training_contract():
     cfg = _cfg()
     matchability = cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY
     verifier = matchability.LEARNED_VERIFIER

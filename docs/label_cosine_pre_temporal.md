@@ -1,5 +1,9 @@
 # 前置直接余弦权重对照
 
+> 2026-10-23：本文为历史前置实验记录。该结构请使用
+> `sav_label_pre_temporal_cosine.yaml`；当前 `sav.yaml` 已切换为
+> [双轴文本拼接第 1 版](text_concat_st.md)，不再是本文配置的别名。
+
 ## 当前版本 v32（2026-10-22）
 
 Support 和 Query 主匹配直接复用各自前置路由的 patch softmax 权重聚合 Post 特征。

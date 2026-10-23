@@ -53,6 +53,21 @@ def add_custom_config(cfg):
     # Faster high-memory alternative to checkpointing the entire encoder/readout.
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.MLP_CHECKPOINT = False
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.READOUT_CHECKPOINT = False
+
+    cfg.FEW_SHOT.TEXT_CONCAT_ST = CfgNode()
+    cfg.FEW_SHOT.TEXT_CONCAT_ST.ENABLE = False
+    cfg.FEW_SHOT.TEXT_CONCAT_ST.TEMPORAL_TEXT_TOKENS = 1
+    cfg.FEW_SHOT.TEXT_CONCAT_ST.SPATIAL_TEXT_TOKENS = 1
+    cfg.FEW_SHOT.TEXT_CONCAT_ST.READOUT = "spatial_text_attention"
+    cfg.FEW_SHOT.TEXT_CONCAT_ST.CLASS_CHUNK_SIZE = 2
+    cfg.FEW_SHOT.TEXT_CONCAT_ST.VIDEO_CHUNK_SIZE = 4
+    cfg.FEW_SHOT.TEXT_CONCAT_ST.ACTIVATION_CHECKPOINT = True
+    # Selective alternative: keep attention activations, recompute only the
+    # MLP and/or final normalization/readout. Never nest with full checkpoints.
+    cfg.FEW_SHOT.TEXT_CONCAT_ST.MLP_CHECKPOINT = False
+    cfg.FEW_SHOT.TEXT_CONCAT_ST.READOUT_CHECKPOINT = False
+    # Opt-in, concat-only; old profiles retain uncached text encoding.
+    cfg.FEW_SHOT.TEXT_CONCAT_ST.CACHE_FROZEN_TEXT = False
     # Per-rank episodes accumulated before one optimizer update.
     cfg.SOLVER.GRAD_ACCUM_STEPS = 1
     # Opt-in floor; zero disables the floor, not non-finite scale checks.
@@ -109,6 +124,7 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_UNMATCHED_COST = 0.0
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_ONE_SIDED = True
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DUAL_LOGIT_LOSS_ENABLE = False
+    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BASE_ONLY_LOSS_ENABLE = False
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BASE_LOGIT_LOSS_WEIGHT = 0.50
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.VERIFIED_LOGIT_LOSS_WEIGHT = 0.50
 

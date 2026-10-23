@@ -21,7 +21,7 @@ This repository contains the official code for the paper "Trokens: Semantic-Awar
 
 ## SAV 默认入口
 
-SAV 使用 `configs/trokens/sav.yaml`。模型与配置见[默认模型说明](docs/model.md)，删除内容及验证见[仓库清理记录](docs/repository_cleanup.md)。
+SAV 使用 `configs/trokens/sav.yaml`，当前为[双轴单文本拼接第 1 版（m/ρ 关闭、global+base 损失、冻结文本缓存）](docs/text_concat_st.md)，默认采用 5×8 并行分块和选择性 checkpoint；[独立输出入口](configs/trokens/sav_text_concat_s1_fast.yaml)使用相同执行参数，原空间 32 份对照为 `configs/trokens/sav_text_concat_s32.yaml`。通用配置见[默认模型说明](docs/model.md)，删除内容及验证见[仓库清理记录](docs/repository_cleanup.md)。
 
 ## Installation
 
