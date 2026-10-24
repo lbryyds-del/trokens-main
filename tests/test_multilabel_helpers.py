@@ -136,7 +136,7 @@ def test_base_only_loss_skips_verified_and_mil_and_preserves_unknown_mask(all_un
     from trokens.config.defaults import get_cfg
     import tools.few_shot_multilabel as helper
     cfg = get_cfg()
-    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav.yaml'))
+    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav_text_concat_s1_base.yaml'))
     cfg.SOLVER.TEMPRATURE = .73
     base = torch.randn(2, 3, requires_grad=True)
     verified = torch.randn(2, 3, requires_grad=True)
@@ -173,7 +173,7 @@ def test_base_only_loss_skips_verified_and_mil_and_preserves_unknown_mask(all_un
 def test_base_only_rejects_missing_base_and_contradictory_dual_mode():
     from trokens.config.defaults import get_cfg
     cfg = get_cfg()
-    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav.yaml'))
+    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav_text_concat_s1_base.yaml'))
     with pytest.raises(ValueError, match='requires base logits'):
         compute_query_partial_q2s_loss(torch.zeros(1, 2), torch.zeros(1, 2), {}, cfg)
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DUAL_LOGIT_LOSS_ENABLE = True
@@ -184,7 +184,7 @@ def test_base_only_rejects_missing_base_and_contradictory_dual_mode():
 def test_base_only_equals_previous_mixed_loss_when_base_is_final():
     from trokens.config.defaults import get_cfg
     cfg = get_cfg()
-    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav.yaml'))
+    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav_text_concat_s1_base.yaml'))
     logits = torch.randn(2, 3, requires_grad=True)
     labels = torch.tensor([[1., 0., -1.], [0., 1., 0.]])
     aux = dict(query_partial_q2s_base_logits=logits)

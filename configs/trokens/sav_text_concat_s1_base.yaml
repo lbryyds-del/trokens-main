@@ -1,0 +1,15 @@
+# Frozen single-text m/rho-off control; same execution/model as the prior sav.
+_BASE_: sav.yaml
+OUTPUT_DIR: output/sav
+FEW_SHOT:
+  QUERY_CLASS_MATCHABILITY:
+    QUALITY_ENABLE: False
+    UNIQUENESS_ENABLE: False
+    ABSOLUTE_MASS_TRANSPORT_STRENGTH: 0.0
+    BASE_ONLY_LOSS_ENABLE: True
+    DUAL_LOGIT_LOSS_ENABLE: False
+    BASE_LOGIT_LOSS_WEIGHT: 1.0
+    VERIFIED_LOGIT_LOSS_WEIGHT: 0.0
+    LEARNED_VERIFIER:
+      SEMANTIC_MIL_WEIGHT: 0.0
+      RELATION_MIL_WEIGHT: 0.0

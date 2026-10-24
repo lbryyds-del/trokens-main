@@ -331,38 +331,48 @@ def inflate_weight(state_dict_2d, state_dict_3d):
     return state_dict_inflated
 
 
-def validate_text_concat_checkpoint(model, state_dict):
-    """Never silently load a pre-routing checkpoint into concatenation v1."""
+def validate_text_concat_checkpoint(model, state_dict, allow_init=False):
+    """Guard concat semantics; v1 -> v2 is explicit encoder initialization only."""
     module = getattr(model, 'text_concat_st', None)
     prefix = 'text_concat_st.'
     present = any(name.startswith(prefix) for name in state_dict)
     if module is None:
         if present:
             raise ValueError('Text-concat checkpoint requires TEXT_CONCAT_ST.ENABLE.')
-        return
+        return False
     signature = state_dict.get(prefix + 'architecture_signature')
     expected_signature = module.architecture_signature
-    if (signature is None or signature.shape != expected_signature.shape
+    initializing = (allow_init and signature is not None and signature.shape == (4,)
+                    and expected_signature.shape == (6,) and signature[0].item() == 1
+                    and expected_signature[0].item() == 2
+                    and torch.equal(signature[1:].cpu(), expected_signature[1:4].cpu())
+                    and not any(name.startswith('query_evidence_verifier.') for name in state_dict))
+    if not initializing and (signature is None or signature.shape != expected_signature.shape
             or not torch.equal(signature.cpu(), expected_signature.cpu())):
         raise ValueError('Text-concat checkpoint architecture/token-count mismatch; start a fresh run.')
-    expected = {name: value for name, value in model.named_parameters() if value.requires_grad}
+    expected = {name: value for name, value in model.named_parameters() if value.requires_grad
+                and not (initializing and name.startswith('query_evidence_verifier.'))}
     missing = [name for name, value in expected.items()
                if name not in state_dict or state_dict[name].shape != value.shape]
     if missing:
         raise ValueError('Incomplete Text-concat checkpoint: ' + ', '.join(missing[:6]))
-    model._text_concat_st_checkpoint_loaded = True
+    model._text_concat_st_checkpoint_loaded = not initializing
+    if initializing:
+        logger.warning('Initializing concat v2 encoder from v1; new evidence heads, epoch/optimizer reset required.')
+        state_dict.pop(prefix + 'architecture_signature')
+    return initializing
 
 
 def validate_label_pre_temporal_checkpoint(model, state_dict, allow_init=False):
     """Guard routing/loss semantics; allow explicit compatible initialization."""
-    validate_text_concat_checkpoint(model, state_dict)
+    concat_init = validate_text_concat_checkpoint(model, state_dict, allow_init)
     module = getattr(model, "label_pre_temporal", None)
     prefix = "label_pre_temporal."
     present = any(name.startswith(prefix) for name in state_dict)
     if module is None:
         if present:
             raise ValueError("Label-pre-temporal checkpoint requires LABEL_PRE_TEMPORAL.ENABLE.")
-        return False
+        return concat_init
     if not present:
         if allow_init:
             logger.warning("Initializing Label-pre-temporal routing from legacy weights; resetting epoch/optimizer.")

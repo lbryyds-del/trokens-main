@@ -3,6 +3,8 @@ _BASE_: sav.yaml
 OUTPUT_DIR: output/sav_text_concat_t1_s32_attention_readout_m_rho_off
 FEW_SHOT:
   QUERY_CLASS_MATCHABILITY:
+    QUALITY_ENABLE: False
+    UNIQUENESS_ENABLE: False
     BASE_ONLY_LOSS_ENABLE: False
     DUAL_LOGIT_LOSS_ENABLE: True
     BASE_LOGIT_LOSS_WEIGHT: 0.60

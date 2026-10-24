@@ -320,8 +320,9 @@ class Pointformer(nn.Module):
         if not self.use_text_concat_st:
             return
         judgments = resolve_query_judgments(self.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY)
-        if judgments.quality or judgments.uniqueness:
-            raise ValueError("TEXT_CONCAT_ST version 1 requires quality m and uniqueness rho OFF.")
+        if ((judgments.quality or judgments.uniqueness)
+                and self.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BASE_ONLY_LOSS_ENABLE):
+            raise ValueError("Text-concat judgments require BASE_ONLY_LOSS_ENABLE=False.")
         if (self.use_label_pre_temporal or self.pot_route_cfg.ENABLE
                 or self.cfg.FEW_SHOT.SUPPORT_TEXT_FUSION.ENABLE):
             raise ValueError("TEXT_CONCAT_ST excludes early routing and Support/text fusion.")
@@ -335,8 +336,9 @@ class Pointformer(nn.Module):
         class_weight = float(self.cfg.FEW_SHOT.CLASS_LOSS_LAMBDA)
         if not np.isfinite(class_weight) or class_weight < 0:
             raise ValueError('CLASS_LOSS_LAMBDA must be finite and non-negative.')
-        self.text_concat_st = TextConcatST(self.cfg.FEW_SHOT.TEXT_CONCAT_ST,
-                                          global_classifier=class_weight > 0)
+        self.text_concat_st = TextConcatST(
+            self.cfg.FEW_SHOT.TEXT_CONCAT_ST, global_classifier=class_weight > 0,
+            quality=judgments.quality, uniqueness=judgments.uniqueness)
         self.blocks[0].checkpoint_mlp = self.text_concat_st.mlp_checkpoint
         self.head.requires_grad_(class_weight > 0)
         self.pre_logits.requires_grad_(class_weight > 0)
@@ -377,8 +379,9 @@ class Pointformer(nn.Module):
         judgments = resolve_query_judgments(match_cfg)
         if not (judgments.quality or judgments.uniqueness):
             return
-        if not self.use_frame_softmax_route or not self.use_query_partial_q2s:
-            raise ValueError("Query evidence verification requires the DinoTxt frame-softmax Query route.")
+        if (not (self.use_frame_softmax_route or getattr(self, 'use_text_concat_st', False))
+                or not self.use_query_partial_q2s):
+            raise ValueError("Query evidence verification requires the DinoTxt frame-softmax or text-concat route.")
         # Do not perturb the existing initialization/episode sampling RNG stream.
         with torch.random.fork_rng(devices=[]):
             self.query_evidence_verifier = QueryEvidenceVerifier(
@@ -1909,7 +1912,7 @@ class Pointformer(nn.Module):
         fused_feat = app_feat + intra_feat + inter_feat
 
         if getattr(self, "use_text_concat_st", False):
-            return text_concat_episode(self, fused_feat, metadata)
+            return text_concat_episode(self, fused_feat, metadata, raw=matchability_evidence_tokens)
         if getattr(self, "use_label_pre_temporal", False):
             return label_conditioned_episode(self, fused_feat, matchability_evidence_tokens, metadata)
 

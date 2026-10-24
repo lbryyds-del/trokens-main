@@ -22,7 +22,7 @@ from tools.few_shot_multilabel import (
 def _cfg():
     cfg = get_cfg()
     # Preserve the historical verifier/early-route contract independently of
-    # the active sav.yaml experiment (text concat with both judgments off).
+    # the active sav.yaml text-concat experiment.
     cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / "configs/trokens/sav_label_pre_temporal_cosine.yaml"))
     return cfg
 

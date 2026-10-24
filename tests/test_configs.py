@@ -38,8 +38,8 @@ def test_sav_defines_concat_profile_and_preserves_historical_cosine_control():
     assert not active.FEW_SHOT.POT_ROUTE.ENABLE
     assert active.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_ENABLE
     assert not active.FEW_SHOT.SUPPORT_TEXT_FUSION.ENABLE
-    assert not active.FEW_SHOT.QUERY_CLASS_MATCHABILITY.QUALITY_ENABLE
-    assert not active.FEW_SHOT.QUERY_CLASS_MATCHABILITY.UNIQUENESS_ENABLE
+    assert active.FEW_SHOT.QUERY_CLASS_MATCHABILITY.QUALITY_ENABLE
+    assert active.FEW_SHOT.QUERY_CLASS_MATCHABILITY.UNIQUENESS_ENABLE
     assert alias.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE
     assert alias.FEW_SHOT.LABEL_PRE_TEMPORAL.SCORING == 'cosine'
     assert not alias.FEW_SHOT.TEXT_CONCAT_ST.ENABLE
@@ -81,7 +81,7 @@ def test_s32_control_preserves_historical_execution_and_loss_settings():
 
 def test_single_text_fast_profile_changes_only_execution_and_output():
     active, fast = get_cfg(), get_cfg()
-    active.merge_from_file(str(CONFIGS / 'sav.yaml'))
+    active.merge_from_file(str(CONFIGS / 'sav_text_concat_s1_base.yaml'))
     fast.merge_from_file(str(CONFIGS / 'sav_text_concat_s1_fast.yaml'))
     assert fast.FEW_SHOT.TEXT_CONCAT_ST.CLASS_CHUNK_SIZE == 5
     assert fast.FEW_SHOT.TEXT_CONCAT_ST.VIDEO_CHUNK_SIZE == 8
@@ -97,9 +97,9 @@ def test_single_text_fast_profile_changes_only_execution_and_output():
     assert fast == active
 
 
-def test_active_concat_has_exactly_global_plus_base_objective():
+def test_base_control_has_exactly_global_plus_base_objective():
     cfg = get_cfg()
-    cfg.merge_from_file(str(CONFIGS / 'sav.yaml'))
+    cfg.merge_from_file(str(CONFIGS / 'sav_text_concat_s1_base.yaml'))
     match = cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY
     assert cfg.FEW_SHOT.CLASS_LOSS_LAMBDA == cfg.FEW_SHOT.Q2S_LOSS_LAMBDA == 1.
     assert match.ENABLE  # Keep unknown-label masking, not the verifier heads.
@@ -110,6 +110,26 @@ def test_active_concat_has_exactly_global_plus_base_objective():
     assert match.LEARNED_VERIFIER.QUALITY_RELATION_STRENGTH == 0.
     assert match.LEARNED_VERIFIER.SEMANTIC_MIL_WEIGHT == 0.
     assert match.LEARNED_VERIFIER.RELATION_MIL_WEIGHT == 0.
+
+
+def test_active_concat_verifier_changes_only_judgments_losses_and_output():
+    active, base = get_cfg(), get_cfg()
+    active.merge_from_file(str(CONFIGS / 'sav.yaml'))
+    base.merge_from_file(str(CONFIGS / 'sav_text_concat_s1_base.yaml'))
+    match = active.FEW_SHOT.QUERY_CLASS_MATCHABILITY
+    assert match.QUALITY_ENABLE and match.UNIQUENESS_ENABLE
+    assert not match.BASE_ONLY_LOSS_ENABLE and match.DUAL_LOGIT_LOSS_ENABLE
+    assert (match.BASE_LOGIT_LOSS_WEIGHT, match.VERIFIED_LOGIT_LOSS_WEIGHT) == (.6, .4)
+    assert match.LEARNED_VERIFIER.SEMANTIC_MIL_WEIGHT == .05
+    assert match.LEARNED_VERIFIER.RELATION_MIL_WEIGHT == .05
+    assert match.LEARNED_VERIFIER.DETACH_INPUTS
+    assert match.ABSOLUTE_MASS_TRANSPORT_STRENGTH == 1.
+    assert match.ABSOLUTE_MASS_ONE_SIDED
+    assert match.LEARNED_VERIFIER.QUALITY_MODE == 'relation_decision'
+    assert active.OUTPUT_DIR != base.OUTPUT_DIR
+    active.FEW_SHOT.QUERY_CLASS_MATCHABILITY = base.FEW_SHOT.QUERY_CLASS_MATCHABILITY.clone()
+    active.OUTPUT_DIR = base.OUTPUT_DIR
+    assert active == base
 
 
 def test_few_shot_loader_uses_episode_sampler_instead_of_generic_batch_size(monkeypatch):

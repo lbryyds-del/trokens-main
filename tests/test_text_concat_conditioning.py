@@ -225,10 +225,10 @@ def test_identical_text_copies_do_not_create_distinct_visual_readout_views():
 
 
 @pytest.mark.parametrize('flag', ['QUALITY_ENABLE', 'UNIQUENESS_ENABLE'])
-def test_v1_rejects_accidentally_enabled_judgments(flag):
+def test_base_only_profile_rejects_accidentally_enabled_judgments(flag):
     model = _concat_model()
     model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY[flag] = True
-    with pytest.raises(ValueError, match='OFF'):
+    with pytest.raises(ValueError, match='BASE_ONLY'):
         model._init_text_concat_st()
 
 

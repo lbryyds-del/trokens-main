@@ -1,5 +1,11 @@
 # SAV 第 1 版：双轴单文本拼接，关闭 m / ρ
 
+本文以下为 v1 历史记录。2026-10-24 起，v1 对照入口固定为
+`configs/trokens/sav_text_concat_s1_base.yaml`（有效配置与切换前的 sav 完全相同），
+原 fast/S32 配置仍关闭 m/ρ。当前 `sav.yaml` 已切换到
+[v2：Raw m / 同空间权重 Post ρ](text_concat_verifier.md)，使用独立输出目录。
+下文提到的“当前 sav”及测速结果均指 v1，不应套用到 v2。
+
 当前入口为 `configs/trokens/sav.yaml`。旧实验仍使用
 `sav_label_pre_temporal*.yaml`，不会随当前入口切换到新结构。
 2026-10-23 将空间文本副本从 32 改为 1；原 32 份配置保留在

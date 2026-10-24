@@ -4,7 +4,7 @@ Uses the actual Pointformer constructor/forward, motion modules, losses and
 optimizer. By default, frozen towers/text use synthetic inputs. --real-data
 uses locally cached towers and SAV episodes (no downloads). Run from the repo
 root, selecting idle GPUs via CUDA_VISIBLE_DEVICES; torchrun enables DDP.
-Also supports TEXT_CONCAT_ST v1 with both judgments disabled.
+Also supports TEXT_CONCAT_ST v1 (judgments off) and v2 (Raw m / Post rho).
 """
 
 import argparse
@@ -159,11 +159,16 @@ def main():
                 "hod_motion_module.fc2.c_fc.weight", "cross_motion_module.fc2.c_fc.weight")
     learned_routing = not concat and core.label_pre_temporal.scoring == "projected_cosine"
     if concat:
-        assert core.label_pre_temporal is None and core.query_evidence_verifier is None
+        assert core.label_pre_temporal is None
+        verifier = core.query_evidence_verifier
+        if verifier is not None:
+            required += tuple('query_evidence_verifier.' + name for name, _ in verifier.named_parameters())
         contract = dict(
             architecture='text_concat_st',
             architecture_signature=core.text_concat_st.architecture_signature.tolist(),
-            main_readout='spatial_text_attention', quality_enabled=False, uniqueness_enabled=False,
+            main_readout='spatial_text_attention',
+            quality_enabled=bool(verifier is not None and verifier.quality),
+            uniqueness_enabled=bool(verifier is not None and verifier.uniqueness),
             video_chunk=encoder_cfg.VIDEO_CHUNK_SIZE, class_chunk=encoder_cfg.CLASS_CHUNK_SIZE,
             checkpoint=encoder_cfg.ACTIVATION_CHECKPOINT,
             mlp_checkpoint=encoder_cfg.MLP_CHECKPOINT,
@@ -226,7 +231,7 @@ def main():
             with sync:
                 with torch.autocast("cuda", dtype=dtype):
                     output = model(inputs)
-                    if concat:
+                    if concat and core.query_evidence_verifier is None:
                         assert torch.equal(output['query_partial_q2s_logits'], output['query_partial_q2s_base_logits'])
                     q2s_loss, _, _ = compute_query_partial_q2s_loss(
                         output["query_partial_q2s_logits"], targets, output, cfg)
@@ -286,7 +291,8 @@ def main():
             **contract,
             synthetic=not args.real_data, excludes_frozen_backbone=not args.real_data, includes_motion=True,
             rank=rank, world_size=world, grad_accum=args.grad_accum,
-            transport_progress=(core.query_evidence_verifier.transport_progress if not concat else None),
+            transport_progress=(core.query_evidence_verifier.transport_progress
+                                if core.query_evidence_verifier is not None else None),
             lr=optimizer.param_groups[0]["lr"],
             shape=[b, k, t, n, d], step=step, attempt=attempt, dtype=args.dtype,
             loss=float(loss.detach()), cls_loss=float(cls_loss.detach()), q2s_loss=float(q2s_loss.detach()),
