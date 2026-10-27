@@ -32,6 +32,12 @@ def test_sav_has_one_public_switch_set_and_retains_training_protocol():
     assert_and_infer_cfg(cfg)
     for name in ("DATA", "MODEL", "MF", "POINT_INFO", "SOLVER", "TRAIN", "TEST", "DATA_LOADER"):
         assert cfg[name] == old[name]
+    assert 'MODE' not in fs['MATCHING']
+    assert not cfg.FEW_SHOT.TEXT_CONCAT_ST.ENABLE
+    assert not cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_ENABLE
+    assert not cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE
+    assert not cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BASE_ONLY_LOSS_ENABLE
+    old.FEW_SHOT.TEXT_CONCAT_ST.ENABLE = False
     assert cfg.FEW_SHOT.TEXT_CONCAT_ST == old.FEW_SHOT.TEXT_CONCAT_ST
     assert cfg.FEW_SHOT.N_WAY == 5 and cfg.FEW_SHOT.K_SHOT == 1
     assert cfg.FEW_SHOT.CLASS_LOSS_LAMBDA == cfg.FEW_SHOT.Q2S_LOSS_LAMBDA == 1.

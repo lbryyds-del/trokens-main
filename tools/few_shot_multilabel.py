@@ -306,6 +306,15 @@ def compute_query_partial_q2s_loss(
 
     verified_scaled = _sanitize(verified_logits)
     verified_loss = supervised_bce(verified_scaled)
+    switches = getattr(getattr(cfg, "FEW_SHOT", None), "DECOUPLING", None)
+    if (not learned and getattr(switches, "QUERY_ENABLE", None) is False
+            and getattr(switches, "SUPPORT_ENABLE", None) is False):
+        # Same ordinary BCE as the default Trokens path. Only the diagnostic
+        # name differs: there is no verifier/final loss in this configuration.
+        return verified_loss, verified_scaled, {
+            "q2s_base_loss": verified_loss.detach(),
+            "q2s_verified_loss": verified_loss.new_zeros(()),
+        }
     diagnostics = {
         "q2s_verified_loss": verified_loss.detach(),
     }

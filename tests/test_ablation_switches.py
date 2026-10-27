@@ -1,6 +1,7 @@
 """Compact maintained regression for the public SAV ablation switches."""
 import copy
 import itertools
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -15,12 +16,15 @@ from trokens.models.pointformer import Pointformer
 from trokens.models.attention import TrajectoryAttentionBlock
 from trokens.models.text_concat_conditioning import text_concat_episode
 from trokens.utils.checkpoint import validate_label_pre_temporal_checkpoint
-from tools.few_shot_multilabel import compute_query_partial_q2s_loss, compute_learned_evidence_mil_loss
+from tools.few_shot_multilabel import (compute_query_partial_q2s_loss,
+    compute_learned_evidence_mil_loss, support_query_split_multilabel)
 
 
 CONFIG = Path(__file__).resolve().parents[1] / 'configs/trokens/sav.yaml'
+sys.path.insert(0, str(CONFIG.parents[2] / 'tools'))
 COMBINATIONS = list(itertools.product((False, True), repeat=4))  # Query, Support, m, rho
 VALID = [x for x in COMBINATIONS if x[0] or not any(x[2:])]
+TEXT_VALID = [x for x in VALID if any(x[:2])]
 
 
 def _cfg(flags):
@@ -31,13 +35,23 @@ def _cfg(flags):
     return resolve_ablation_cfg(cfg)
 
 
-def _model(flags, mode='selective'):
+def _model(flags, mode='selective', archived_shared=False):
     """Real encoder/verifier/head, with small tensors and no backbone downloads."""
     torch.manual_seed(71)
     model = Pointformer.__new__(Pointformer)
     nn.Module.__init__(model)
     model.cfg = _cfg(flags)
     cfg = model.cfg
+    if archived_shared:
+        # Explicit old v5 profile, not the new public four-switch baseline.
+        for name in cfg.FEW_SHOT.DECOUPLING:
+            cfg.FEW_SHOT.DECOUPLING[name] = None
+        cfg.FEW_SHOT.TEXT_CONCAT_ST.ENABLE = True
+        cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_ENABLE = True
+        cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE = True
+        cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BASE_ONLY_LOSS_ENABLE = True
+        cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_LOGIT_ALPHA = 10.
+        cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_LOGIT_BIAS = -2.
     cfg.TEST.SEEN_LABELS = [0, 1]
     cfg.MODEL.NUM_CLASSES = 2
     cfg.FEW_SHOT.TEXT_CONCAT_ST.CLASS_CHUNK_SIZE = 1
@@ -50,7 +64,9 @@ def _model(flags, mode='selective'):
     model.embed_dim, model.depth, model.point_grid_size, model.temporal_resolution = 4, 1, 1, 3
     model.pot_route_cfg = cfg.FEW_SHOT.POT_ROUTE
     model.use_frame_softmax_route = model.use_support_text_fusion = model.use_label_pre_temporal = False
-    model.use_query_partial_q2s = model.use_text_concat_st = model.is_multilabel_few_shot = True
+    model.is_multilabel_few_shot = True
+    model.use_query_partial_q2s = cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_ENABLE
+    model.use_text_concat_st = cfg.FEW_SHOT.TEXT_CONCAT_ST.ENABLE
     model.feat_extractor_type = 'dinotxt_vitl14_reg4'
     model.cls_token = nn.Parameter(torch.randn(1, 1, 4))
     model.pos_drop, model.head_drop = nn.Identity(), nn.Identity()
@@ -60,6 +76,13 @@ def _model(flags, mode='selective'):
     model._get_pot_label_text_features = lambda ids, dtype: torch.eye(4, dtype=dtype, device=ids.device)[ids]
     model._init_query_evidence_verifier()
     model._init_text_concat_st()
+    # Feed synthetic trajectory features into the REAL default forward entry.
+    # Only backbone/sampling/motion are stubbed; pt_forward/readout are intact.
+    cfg.MF.USE_BASE_POS_EMBED = False
+    cfg.MODEL.MOTION_MODULE.USE_CROSS_MOTION_MODULE = False
+    cfg.MODEL.MOTION_MODULE.USE_HOD_MOTION_MODULE = False
+    model.get_dinotxt_features = lambda video: video
+    model._sample_point_features = lambda features, tracks, **kwargs: features
     return model
 
 
@@ -71,14 +94,28 @@ def _episode():
     visibility[0, 1, 2:] = False
     visibility[2, 1] = False
     return f, raw, dict(support_mask=torch.tensor([True, True, False, False]),
+        sample_type=['support', 'support', 'query', 'query'], pred_tracks=torch.zeros(4, 3, 5, 2),
         pred_query_mask=mask, pred_visibility=visibility, episode_class_ids=torch.tensor([0, 1]),
         episode_positive_labels=torch.tensor([[1, 0], [0, 1], [1, 0], [0, 1]]).bool())
 
 
+def _forward(model, f, raw, meta):
+    if model.use_text_concat_st:
+        return text_concat_episode(model, f, meta, raw)
+    return model({'video': f, 'metadata': meta})
+
+
 def _loss(model, out, meta):
     targets = meta['episode_positive_labels'][~meta['support_mask']].float()
-    q2s, _, metrics = compute_query_partial_q2s_loss(out['query_partial_q2s_logits'], targets, out, model.cfg)
-    total = q2s + F.binary_cross_entropy_with_logits(out['global_classification_logits'],
+    if isinstance(out, tuple):
+        from train_few_shot import process_patch_tokens
+        global_logits, patches, aux = out
+        split = support_query_split_multilabel(patches, meta['episode_positive_labels'].float(), meta)
+        scores = process_patch_tokens(model.cfg, split['support_preds'], split['query_preds'])
+    else:
+        global_logits, scores, aux = out['global_classification_logits'], out['query_partial_q2s_logits'], out
+    q2s, _, metrics = compute_query_partial_q2s_loss(scores, targets, aux, model.cfg)
+    total = q2s + F.binary_cross_entropy_with_logits(global_logits,
                                                    meta['episode_positive_labels'].float())
     return total, q2s, metrics
 
@@ -96,18 +133,21 @@ def test_config_dependencies_weights_and_idempotence(flags):
     resolve_ablation_cfg(cfg)
     assert cfg == expected and cfg.is_frozen()
     match = cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY
+    assert cfg.FEW_SHOT.TEXT_CONCAT_ST.ENABLE == (query or support)
+    assert cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_ENABLE == (query or support)
+    assert match.ENABLE == (query or support)
     assert cfg.FEW_SHOT.TEXT_CONCAT_ST.SHARED_QUERY_ENABLE == (not query)
     assert cfg.FEW_SHOT.TEXT_CONCAT_ST.SHARED_SUPPORT_ENABLE == (not support)
     assert (match.QUALITY_ENABLE, match.UNIQUENESS_ENABLE) == (m, rho)
     assert (match.BASE_LOGIT_LOSS_WEIGHT, match.VERIFIED_LOGIT_LOSS_WEIGHT) == ((.6, .4) if m or rho else (1., 0.))
-    assert match.BASE_ONLY_LOSS_ENABLE == (not (m or rho))
+    assert match.BASE_ONLY_LOSS_ENABLE == ((query or support) and not (m or rho))
     assert match.DUAL_LOGIT_LOSS_ENABLE == (m or rho)
     assert match.LEARNED_VERIFIER.SEMANTIC_MIL_WEIGHT == (.05 if m else 0.)
     assert match.LEARNED_VERIFIER.RELATION_MIL_WEIGHT == (.05 if rho else 0.)
     assert match.ABSOLUTE_MASS_TRANSPORT_STRENGTH == (1. if m or rho else 0.)
 
 
-@pytest.mark.parametrize('flags', VALID)
+@pytest.mark.parametrize('flags', TEXT_VALID)
 @pytest.mark.parametrize('mode', ['none', 'full', 'selective'])
 def test_roles_matching_and_exact_loss_gradients(flags, mode, monkeypatch):
     query, support, m, rho = flags
@@ -165,7 +205,7 @@ def test_roles_matching_and_exact_loss_gradients(flags, mode, monkeypatch):
             assert parameter.grad is not None and torch.isfinite(parameter.grad).all(), name
 
 
-@pytest.mark.parametrize('flags', VALID)
+@pytest.mark.parametrize('flags', TEXT_VALID)
 def test_no_query_label_leakage_and_shared_role_ordinary_oracle(flags):
     model = _model(flags).eval()
     f, raw, meta = _episode()
@@ -184,7 +224,7 @@ def test_no_query_label_leakage_and_shared_role_ordinary_oracle(flags):
         torch.testing.assert_close(out['global_classification_logits'][:2], model.head(cls[:2]))
 
 
-@pytest.mark.parametrize('flags', VALID)
+@pytest.mark.parametrize('flags', TEXT_VALID)
 def test_empty_masks_unknown_labels_and_checkpoint_isolation(flags):
     model = _model(flags).eval()
     f, raw, meta = _episode()
@@ -208,9 +248,18 @@ def test_five_way_matching_shape(query, support):
     model._get_pot_label_text_features = lambda ids, dtype: F.one_hot(ids % 4, 4).to(dtype)
     f, raw = torch.randn(7, 3, 5, 4, requires_grad=True), torch.randn(7, 3, 5, 4)
     meta = dict(support_mask=torch.tensor([True] * 5 + [False] * 2),
+        sample_type=['support'] * 5 + ['query'] * 2, pred_tracks=torch.zeros(7, 3, 5, 2),
         pred_query_mask=torch.ones(7, 3, 5).bool(), pred_visibility=torch.ones(7, 3, 5).bool(),
         episode_class_ids=torch.arange(5), episode_positive_labels=torch.eye(5)[[0, 1, 2, 3, 4, 0, 3]].bool())
-    out = text_concat_episode(model, f, meta, raw)
+    out = _forward(model, f, raw, meta)
+    if not query and not support:
+        from train_few_shot import process_patch_tokens
+        assert out[1].shape == (7, 3, 5, 4) and out[2] is None
+        split = support_query_split_multilabel(out[1], meta['episode_positive_labels'].float(), meta)
+        assert process_patch_tokens(model.cfg, split['support_preds'], split['query_preds']).shape == (2, 5)
+        _loss(model, out, meta)[0].backward()
+        assert torch.isfinite(f.grad).all()
+        return
     assert out['query_partial_query_prototypes'].shape == ((2, 5, 3, 4) if query else (2, 3, 4))
     assert out['query_partial_support_prototypes'].shape == (5, 3, 4)
     assert out['query_partial_q2s_logits'].shape == (2, 5)
@@ -248,13 +297,146 @@ def test_toggling_back_off_clears_every_derived_loss_and_transport():
     assert match.LEARNED_VERIFIER.SEMANTIC_MIL_WEIGHT == match.LEARNED_VERIFIER.RELATION_MIL_WEIGHT == 0.
 
 
+def test_both_roles_off_automatically_restore_default_branch_and_toggle_back():
+    cfg = _cfg((True, True, True, True))
+    for name in cfg.FEW_SHOT.DECOUPLING:
+        cfg.FEW_SHOT.DECOUPLING[name] = False
+    resolve_ablation_cfg(cfg)
+    expected = cfg.clone()
+    cfg.freeze()
+    resolve_ablation_cfg(cfg)
+    assert cfg == expected and cfg.is_frozen()
+    assert not cfg.FEW_SHOT.TEXT_CONCAT_ST.ENABLE
+    assert not cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_ENABLE
+    assert not cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE
+    assert not cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BASE_ONLY_LOSS_ENABLE
+    assert not cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DUAL_LOGIT_LOSS_ENABLE
+    assert cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_LOGIT_ALPHA == 1.
+    assert cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_LOGIT_BIAS == 0.
+    cfg.defrost()
+    cfg.FEW_SHOT.DECOUPLING.SUPPORT_ENABLE = True
+    resolve_ablation_cfg(cfg)
+    assert cfg.FEW_SHOT.TEXT_CONCAT_ST.ENABLE
+    assert cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BASE_ONLY_LOSS_ENABLE
+    assert cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_LOGIT_ALPHA == 10.
+    assert cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_LOGIT_BIAS == -2.
+
+
+@pytest.mark.parametrize('mode', ['none', 'full', 'selective'])
+def test_default_branch_reuses_old_train_test_formula_and_gradients(mode, monkeypatch):
+    # Import the production scorers, not a second implementation of the route.
+    monkeypatch.syspath_prepend(str(CONFIG.parents[2] / 'tools'))
+    from train_few_shot import process_patch_tokens as train_score
+    from test_few_shot import process_patch_tokens as test_score
+    from tools.few_shot_multilabel import support_query_split_multilabel, unpack_episode_output
+    flags = (False, False, False, False)
+    model = _model(flags, mode).train()
+    f, raw, meta = _episode()
+    f.requires_grad_()
+    # Class zero has two Support videos: averaging must precede ReLU.
+    meta['episode_positive_labels'][1] = torch.tensor([True, True])
+    meta['sample_type'] = ['support', 'support', 'query', 'query']
+    labels = meta['episode_positive_labels'].float()
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Default branch must not read text or calibrated similarities')
+    monkeypatch.setattr('trokens.models.pointformer.text_concat_episode', forbidden)
+    monkeypatch.setattr(model, '_get_pot_label_text_features', forbidden)
+    monkeypatch.setattr(model.blocks[0], 'forward_text_concat', forbidden)
+    monkeypatch.setattr(model, '_compute_bidirectional_frame_similarity', forbidden)
+    logits, patches, aux = unpack_episode_output(_forward(model, f, raw, meta))
+    assert model.text_concat_st is None and not model.use_query_partial_q2s
+    assert not model.blocks[0].checkpoint_mlp  # concat checkpoint options are ignored
+    assert aux is None and model.query_evidence_verifier is None
+    assert patches.shape == f.shape
+    cls_oracle, patches_oracle = model.pt_forward(f, meta)
+    torch.testing.assert_close(patches, patches_oracle)
+    torch.testing.assert_close(logits, model.head(cls_oracle))
+    changed = copy.deepcopy(meta)
+    changed['episode_positive_labels'][2:] = ~changed['episode_positive_labels'][2:]
+    changed['episode_class_ids'] = torch.tensor([999, 888])
+    other_logits, other_patches, _ = _forward(model, f, raw, changed)
+    torch.testing.assert_close(logits, other_logits, rtol=0, atol=0)
+    torch.testing.assert_close(patches, other_patches, rtol=0, atol=0)
+    split = support_query_split_multilabel(patches, labels, meta)
+    score = train_score(model.cfg, split['support_preds'], split['query_preds'])
+    torch.testing.assert_close(score, test_score(model.cfg, split['support_preds'], split['query_preds']), rtol=0, atol=0)
+    q = F.relu(patches[2:]).mean(2).float()
+    s = F.relu(torch.stack((patches[:2].mean(0), patches[1]))).mean(2).float()
+    numerator = torch.einsum('qtd,ksd->qkts', q, s)
+    denominator = q.norm(dim=-1)[:, None, :, None] * s.norm(dim=-1)[None, :, None, :] + .01
+    distance = 1 - numerator / denominator
+    oracle = -(distance.min(3).values.sum(2) + distance.min(2).values.sum(2))
+    torch.testing.assert_close(score, oracle)
+    assert score.le(0).all()
+    model.cfg.FEW_SHOT.MATCHING.LOGIT_SCALE = 123.
+    model.cfg.FEW_SHOT.MATCHING.LOGIT_BIAS = 456.
+    model.pot_route_cfg.QUERY_PARTIAL_LOGIT_ALPHA = 789.
+    model.pot_route_cfg.QUERY_PARTIAL_LOGIT_BIAS = 987.
+    torch.testing.assert_close(score, train_score(model.cfg, split['support_preds'], split['query_preds']), rtol=0, atol=0)
+    model.cfg.SOLVER.TEMPRATURE = .73
+    loss, scaled, metrics = compute_query_partial_q2s_loss(score, split['query_batch_labels'], aux, model.cfg)
+    torch.testing.assert_close(loss, F.binary_cross_entropy_with_logits(score / .73, labels[2:]))
+    torch.testing.assert_close(scaled, score / .73)
+    assert metrics['q2s_verified_loss'] == 0 and not any('mil' in k for k in metrics)
+    (loss + F.binary_cross_entropy_with_logits(logits, labels)).backward()
+    assert torch.isfinite(f.grad).all() and f.grad[:2].abs().sum() > 0 and f.grad[2:].abs().sum() > 0
+    for parameter in model.parameters():
+        if parameter.requires_grad:
+            assert parameter.grad is not None and torch.isfinite(parameter.grad).all()
+
+
+def test_default_branch_rejects_old_calibrated_shared_checkpoint():
+    flags = (False, False, False, False)
+    calibrated, baseline = _model(flags, archived_shared=True), _model(flags)
+    assert calibrated.text_concat_st.architecture_signature.tolist() == [5, 0, 0, 1]
+    assert baseline.text_concat_st is None
+    validate_label_pre_temporal_checkpoint(baseline, baseline.state_dict())
+    for destination, source in ((baseline, calibrated), (calibrated, baseline)):
+        with pytest.raises(ValueError):
+            validate_label_pre_temporal_checkpoint(destination, source.state_dict())
+
+
+def test_default_constructor_skips_text_and_matches_explicit_original_initialization(monkeypatch):
+    cfg = _cfg((False, False, False, False))
+    original = cfg.clone()
+    for name in original.FEW_SHOT.DECOUPLING:
+        original.FEW_SHOT.DECOUPLING[name] = None
+    # The old default entry used these explicit flags, not a text dispatcher.
+    original.FEW_SHOT.TEXT_CONCAT_ST.ENABLE = False
+    original.FEW_SHOT.POT_ROUTE.ENABLE = False
+    original.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_ENABLE = False
+    original.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE = False
+    original.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BASE_ONLY_LOSS_ENABLE = False
+    original.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DUAL_LOGIT_LOSS_ENABLE = False
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Default model constructor must not initialize any text resources')
+    monkeypatch.setattr(Pointformer, '_load_dinotxt_visual_model', lambda self: nn.Identity())
+    for name in ('_load_dinotxt_text_model', '_load_dinotxt_tokenizer',
+                 '_load_atomic_label_names', '_load_label_prompt_groups'):
+        monkeypatch.setattr(Pointformer, name, forbidden)
+    torch.manual_seed(149)
+    baseline = Pointformer(cfg)
+    rng = torch.random.get_rng_state()
+    torch.manual_seed(149)
+    reference = Pointformer(original)
+    torch.testing.assert_close(torch.random.get_rng_state(), rng, rtol=0, atol=0)
+    assert not baseline.use_text_concat_st and not baseline.use_label_text_features
+    assert not baseline.use_query_partial_q2s and not baseline.use_frame_softmax_route
+    assert baseline.text_concat_st is None and baseline.query_evidence_verifier is None
+    assert not hasattr(baseline, 'dinotxt_text_model')
+    assert not hasattr(baseline, 'dinotxt_tokenizer')
+    assert baseline.state_dict().keys() == reference.state_dict().keys()
+    for name, value in baseline.state_dict().items():
+        torch.testing.assert_close(value, reference.state_dict()[name], rtol=0, atol=0)
+
+
 class _DDPEpisode(nn.Module):
     def __init__(self, flags):
         super().__init__()
         self.core = _model(flags)
 
     def forward(self, f, raw, meta):
-        return text_concat_episode(self.core, f, meta, raw)
+        return _forward(self.core, f, raw, meta)
 
 
 def _ddp_worker(rank, path, flags):
