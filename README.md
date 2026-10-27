@@ -21,7 +21,9 @@ This repository contains the official code for the paper "Trokens: Semantic-Awar
 
 ## SAV 默认入口
 
-SAV 使用 `configs/trokens/sav.yaml`，当前为[双轴单文本拼接＋Raw m／Post ρ](docs/text_concat_verifier.md)，保留 5×8 分块、选择性 checkpoint 和冻结文本缓存。原 [m/ρ 关闭版](docs/text_concat_st.md) 固定在 `configs/trokens/sav_text_concat_s1_base.yaml`，其 fast 入口和空间 32 份对照仍保持原配置。通用配置见[默认模型说明](docs/model.md)，删除内容及验证见[仓库清理记录](docs/repository_cleanup.md)。
+SAV 默认入口 `configs/trokens/sav.yaml` 使用[统一消融开关与损失联动](docs/sav_ablation.md)：`FEW_SHOT.DECOUPLING` 下的 `QUERY_ENABLE`、`SUPPORT_ENABLE`、`M_ENABLE`、`RHO_ENABLE`。当前全部关闭；Query 开启才允许 K:K 同类匹配及 m/ρ，判断头、匹配修正、base/final 与辅助损失自动对应，无需再修改多组旧开关。
+
+原[仅 Support 拼接版](docs/text_concat_shared_query.md) 保留在 `sav_text_concat_shared_query.yaml`；原[双侧拼接＋m/ρ 开启版](docs/text_concat_verifier.md) 固定在 `sav_text_concat_s1_m_rho_on.yaml`，原[双侧拼接、m/ρ 关闭版](docs/text_concat_st.md) 固定在 `sav_text_concat_s1_base.yaml`；fast、S32 和旧前置路由配置的有效值保持不变。通用配置见[默认模型说明](docs/model.md)，删除内容及验证见[仓库清理记录](docs/repository_cleanup.md)。
 
 ## Installation
 

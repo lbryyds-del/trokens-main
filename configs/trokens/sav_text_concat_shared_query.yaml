@@ -1,0 +1,8 @@
+# Support: unchanged temporal/spatial single-text concat and attention readout.
+# Query: one generic space-time encoding, visual mean pooling, all-class match.
+# Inherit m/rho OFF, transport=0, both MIL weights=0, and L_global + L_base.
+_BASE_: sav_text_concat_s1_base.yaml
+OUTPUT_DIR: output/sav_text_concat_shared_query_m_rho_off
+FEW_SHOT:
+  TEXT_CONCAT_ST:
+    SHARED_QUERY_ENABLE: True

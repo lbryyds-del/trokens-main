@@ -34,15 +34,6 @@ class Mlp(nn.Module):
         return x
 
 
-class Permute(nn.Module):
-    def __init__(self, dims):
-        super().__init__()
-        self.dims = dims
-
-    def forward(self, x):
-        return x.permute(*self.dims)
-
-
 def drop_path(x, drop_prob: float = 0.0, training: bool = False):
     """
     Stochastic Depth per sample.

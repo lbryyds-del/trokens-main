@@ -9,6 +9,7 @@ import math
 from functools import partial
 
 import torch
+from trokens.models.episode_outputs import _detach_diagnostics, _merge_outputs
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
@@ -315,39 +316,6 @@ def _query_chunk(model, tokens, token_mask, state, gate, early_weights, route_ma
     frames, weights, hypotheses, outputs = zip(*parts)
     return (torch.cat(frames, 1), torch.cat(weights, 1), torch.cat(hypotheses, 1),
             _merge_outputs(outputs, class_axis=True), global_sum)
-
-
-def _merge_outputs(parts, class_axis=False):
-    if not parts or not parts[0]:
-        return {}
-    result = {}
-    for key in parts[0]:
-        values = [part[key] for part in parts]
-        if key.endswith("reference_available"):
-            result[key] = torch.cat(values, 0) if class_axis else values[0]
-        else:
-            result[key] = torch.cat(values, 1 if class_axis else 0)
-    return result
-
-
-def _detach_diagnostics(result):
-    """Expose only loss inputs to DDP's autograd output traversal.
-
-    In PyTorch 2.0, DDP(find_unused_parameters=True) sends undefined gradients
-    through unused differentiable outputs. With CUDA checkpoints, these can
-    unpack the same checkpoint concurrently on different autograd threads,
-    before its saved tensors have finished recomputing. Diagnostics keep their
-    values but must not be extra backward roots. Detach only at the final
-    output boundary, AFTER the full differentiable logits have been computed.
-    """
-    # Keep in sync with compute_query_partial_q2s_loss (dual BCE + two MILs).
-    loss_inputs = {
-        "query_partial_q2s_logits", "query_partial_q2s_base_logits",
-        "query_quality_logits", "query_relation_logits",
-        "global_classification_logits",
-    }
-    return {key: value.detach() if torch.is_tensor(value) and key not in loss_inputs else value
-            for key, value in result.items()}
 
 
 def label_conditioned_episode(model, features, raw, metadata):

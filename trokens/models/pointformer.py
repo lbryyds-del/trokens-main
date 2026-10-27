@@ -14,8 +14,8 @@ from torch.nn.init import trunc_normal_
 
 from trokens.models.attention import TrajectoryAttentionBlock
 from trokens.config.query_judgments import resolve_query_judgments
+from trokens.config.ablation import resolve_ablation_cfg
 from trokens.models.query_evidence_verifier import QueryEvidenceVerifier, build_query_q2s_aux
-from trokens.models.label_conditioned_routing import LabelPreTemporalRouting, label_conditioned_episode
 from trokens.models.text_concat_conditioning import TextConcatST, text_concat_episode
 from trokens.models.frozen_text_cache import FrozenLabelTextCache
 from trokens.models.branches.motion_blocks import (
@@ -33,6 +33,7 @@ class Pointformer(nn.Module):
 
     def __init__(self, cfg):
         super().__init__()
+        resolve_ablation_cfg(cfg)
         self.img_size = cfg.DATA.TRAIN_CROP_SIZE
         # self.patch_size = cfg.MF.PATCH_SIZE
         self.feat_extractor_type = cfg.MODEL.FEAT_EXTRACTOR
@@ -349,6 +350,7 @@ class Pointformer(nn.Module):
         self.label_pre_temporal = None
         if not self.use_label_pre_temporal:
             return
+        from trokens.models.label_conditioned_routing import LabelPreTemporalRouting
         if (not self.use_query_partial_q2s or not self.use_support_text_fusion
                 or self.depth != 1 or self.cfg.MF.PT_ATTENTION != "divided_space_time"
                 or self.cfg.MODEL.ADAPOOLING.ENABLE or not self.cfg.POINT_INFO.ENABLE
@@ -1453,11 +1455,14 @@ class Pointformer(nn.Module):
         query_prototypes_frame,
         support_prototypes_frame,
     ):
-        """Return diagonal per-class bidirectional frame cosine similarity."""
-        # query_prototypes_frame: [Q, N, Tq, C]; support_prototypes_frame: [N, Ts, C]
+        """Match shared [Q,T,D] or class-conditioned [Q,K,T,D] Query to Support."""
+        # Support: [K,Ts,D]. Shared Query has no class axis or feature expansion.
         query_norm = self._safe_l2_normalize(query_prototypes_frame, dim=-1)
         support_norm = self._safe_l2_normalize(support_prototypes_frame, dim=-1)
-        sim = torch.einsum("qntc,nsc->qnts", query_norm, support_norm)
+        if query_norm.ndim == 3:
+            sim = torch.einsum("qtc,nsc->qnts", query_norm, support_norm)
+        else:
+            sim = torch.einsum("qntc,nsc->qnts", query_norm, support_norm)
         sim = torch.nan_to_num(
             sim,
             nan=0.0,
@@ -1914,6 +1919,7 @@ class Pointformer(nn.Module):
         if getattr(self, "use_text_concat_st", False):
             return text_concat_episode(self, fused_feat, metadata, raw=matchability_evidence_tokens)
         if getattr(self, "use_label_pre_temporal", False):
+            from trokens.models.label_conditioned_routing import label_conditioned_episode
             return label_conditioned_episode(self, fused_feat, matchability_evidence_tokens, metadata)
 
         cls_x, patch_x = self.pt_forward(fused_feat, metadata)

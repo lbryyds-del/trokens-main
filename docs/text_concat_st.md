@@ -2,11 +2,12 @@
 
 本文以下为 v1 历史记录。2026-10-24 起，v1 对照入口固定为
 `configs/trokens/sav_text_concat_s1_base.yaml`（有效配置与切换前的 sav 完全相同），
-原 fast/S32 配置仍关闭 m/ρ。当前 `sav.yaml` 已切换到
-[v2：Raw m / 同空间权重 Post ρ](text_concat_verifier.md)，使用独立输出目录。
-下文提到的“当前 sav”及测速结果均指 v1，不应套用到 v2。
+原 fast/S32 配置仍关闭 m/ρ。[v2：Raw m / 同空间权重 Post ρ](text_concat_verifier.md)
+保留在 `sav_text_concat_s1_m_rho_on.yaml`；当前 `sav.yaml` 为
+[Support / Query 均通用编码、m/ρ 全关闭版](shared_support_query.md)。
+下文提到的“当前 sav”及测速结果均指历史 v1，不应套用到其他结构。
 
-当前入口为 `configs/trokens/sav.yaml`。旧实验仍使用
+本版入口为 `configs/trokens/sav_text_concat_s1_base.yaml`。旧实验仍使用
 `sav_label_pre_temporal*.yaml`，不会随当前入口切换到新结构。
 2026-10-23 将空间文本副本从 32 改为 1；原 32 份配置保留在
 `sav_text_concat_s32.yaml`，不覆盖原实验输出，也不停止已有训练进程。
@@ -81,14 +82,14 @@ episode 的全部候选类别。也不再用 Support 特征改写 Query 文本�
 启动命令（选择空闲 GPU；不加 `--dry-run` 才会正式运行）：
 
 ```bash
-/home/duanwei/miniconda3/envs/trokens/bin/python /data3/duanwei/trokens-main/tools/run_local.py --cfg /data3/duanwei/trokens-main/configs/trokens/sav.yaml --gpus 0,1 --dry-run
+/home/duanwei/miniconda3/envs/trokens/bin/python /data3/duanwei/trokens-main/tools/run_local.py --cfg /data3/duanwei/trokens-main/configs/trokens/sav_text_concat_s1_base.yaml --gpus 0,1 --dry-run
 ```
 
-输出目录为 `output/sav_text_concat_t1_s1_attention_readout_m_rho_off`。
+当前保留入口输出目录为 `output/sav`。
 上面的 GPU 编号只是命令示例，必须确认空闲后才正式运行；本次修改不启动正式训练。
-有限步检查可复用 `tools/smoke_label_pre_temporal.py --cfg configs/trokens/sav.yaml`；
-默认合成输入，`--real-data` 使用本地数据和缓存 backbone，不下载或保存 checkpoint。
-这些检查只验证可执行性及数值链路，不代表验证集准确率或实验收益。
+旧有限步测速工具已清理。当前保留 `tests/test_ablation_switches.py` 的
+开关、匹配、损失和 CPU DDP 检查，见[统一消融说明](sav_ablation.md)。
+这些检查只验证实现，不代表验证集准确率、GPU 性能或实验收益。
 
 ## 保持逻辑的提速：冻结文本缓存
 

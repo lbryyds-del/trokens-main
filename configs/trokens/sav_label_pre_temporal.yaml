@@ -1,6 +1,6 @@
-_BASE_: sav.yaml
+_BASE_: sav_text_concat_s1_m_rho_on.yaml
 
-# Projected-cosine serial control; quality selection is inherited from sav.yaml.
+# Projected-cosine serial control; inherit the preserved m/rho-ON profile.
 # Explicit overrides preserve this profile when the active sav defaults change.
 # v30: unchanged encoding; reuse early weights for main Post pooling; retain Post rho.
 OUTPUT_DIR: output/sav_label_pre_temporal_relation_decision_reuse_pre_weights_post_rho_st_bias_cls

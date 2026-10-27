@@ -1,5 +1,5 @@
 # Original 32-copy control. Keep its execution profile and output separate.
-_BASE_: sav.yaml
+_BASE_: sav_text_concat_s1_m_rho_on.yaml
 OUTPUT_DIR: output/sav_text_concat_t1_s32_attention_readout_m_rho_off
 FEW_SHOT:
   QUERY_CLASS_MATCHABILITY:

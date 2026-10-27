@@ -17,7 +17,6 @@ from torch import nn
 
 import trokens.utils.logging as logging
 import trokens.utils.multiprocessing as mpu
-from trokens.models.batchnorm_helper import SubBatchNorm3d
 from trokens.utils.env import pathmgr
 
 logger = logging.get_logger(__name__)
@@ -250,24 +249,6 @@ def frozen_bn_stats(model):
     for m in model.modules():
         if isinstance(m, nn.BatchNorm3d):
             m.eval()
-
-
-def aggregate_sub_bn_stats(module):
-    """
-    Recursively find all SubBN modules and aggregate sub-BN stats.
-    Args:
-        module (nn.Module)
-    Returns:
-        count (int): number of SubBN module found.
-    """
-    count = 0
-    for child in module.children():
-        if isinstance(child, SubBatchNorm3d):
-            child.aggregate_stats()
-            count += 1
-        else:
-            count += aggregate_sub_bn_stats(child)
-    return count
 
 
 def launch_job(cfg, init_method, func, daemon=False, new_dist_init=False, args=None, wandb_run=None):

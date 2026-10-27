@@ -30,6 +30,22 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.TRAIN_OG_EPISODES = False
     cfg.FEW_SHOT.CLASS_LOSS_LAMBDA = 1.0
     cfg.FEW_SHOT.Q2S_LOSS_LAMBDA = 1.0
+    # None leaves archived/other-dataset configs untouched. SAV specifies all
+    # four booleans; resolve_ablation_cfg derives legacy flags and loss weights.
+    cfg.FEW_SHOT.DECOUPLING = CfgNode()
+    cfg.FEW_SHOT.DECOUPLING.QUERY_ENABLE = None
+    cfg.FEW_SHOT.DECOUPLING.SUPPORT_ENABLE = None
+    cfg.FEW_SHOT.DECOUPLING.M_ENABLE = None
+    cfg.FEW_SHOT.DECOUPLING.RHO_ENABLE = None
+    cfg.FEW_SHOT.MATCHING = CfgNode()
+    cfg.FEW_SHOT.MATCHING.LOGIT_SCALE = 10.0
+    cfg.FEW_SHOT.MATCHING.LOGIT_BIAS = -2.0
+    # Used only when at least one judgment is enabled; otherwise exactly 1/0.
+    cfg.FEW_SHOT.MATCHING.BASE_LOSS_WEIGHT = 0.6
+    cfg.FEW_SHOT.MATCHING.FINAL_LOSS_WEIGHT = 0.4
+    cfg.FEW_SHOT.MATCHING.M_AUX_WEIGHT = 0.05
+    cfg.FEW_SHOT.MATCHING.RHO_AUX_WEIGHT = 0.05
+    cfg.FEW_SHOT.MATCHING.TRANSPORT_STRENGTH = 1.0
     # Opt-in single-path Label -> Patch priors inside serial temporal/spatial attention.
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL = CfgNode()
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE = False
@@ -56,6 +72,12 @@ def add_custom_config(cfg):
 
     cfg.FEW_SHOT.TEXT_CONCAT_ST = CfgNode()
     cfg.FEW_SHOT.TEXT_CONCAT_ST.ENABLE = False
+    # Support stays text-conditioned; Query is encoded once without text.
+    # This ablation requires both evidence judgments OFF.
+    cfg.FEW_SHOT.TEXT_CONCAT_ST.SHARED_QUERY_ENABLE = False
+    # Support uses ordinary visual-only encoding and mean patch readout,
+    # independently of whether Query is class-conditioned.
+    cfg.FEW_SHOT.TEXT_CONCAT_ST.SHARED_SUPPORT_ENABLE = False
     cfg.FEW_SHOT.TEXT_CONCAT_ST.TEMPORAL_TEXT_TOKENS = 1
     cfg.FEW_SHOT.TEXT_CONCAT_ST.SPATIAL_TEXT_TOKENS = 1
     cfg.FEW_SHOT.TEXT_CONCAT_ST.READOUT = "spatial_text_attention"

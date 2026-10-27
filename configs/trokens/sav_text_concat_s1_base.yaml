@@ -1,5 +1,5 @@
 # Frozen single-text m/rho-off control; same execution/model as the prior sav.
-_BASE_: sav.yaml
+_BASE_: sav_text_concat_s1_m_rho_on.yaml
 OUTPUT_DIR: output/sav
 FEW_SHOT:
   QUERY_CLASS_MATCHABILITY:

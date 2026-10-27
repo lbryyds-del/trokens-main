@@ -1,6 +1,7 @@
 # 双轴单文本拼接 v2：Raw m + 同空间权重 Post ρ
 
-入口 `configs/trokens/sav.yaml`；当前配置输出 `output/savo`（以启动时加载的配置为准）。
+保留入口 `configs/trokens/sav_text_concat_s1_m_rho_on.yaml`；输出 `output/savo`（以启动时加载的配置为准）。
+默认 `sav.yaml` 已切换到[Support / Query 均通用编码、m/ρ 全关闭实验](shared_support_query.md)；本文描述原双侧拼接开启版。
 这是新的判断/损失实验，不是与关闭版数值等价的提速。未自动启动正式训练。
 
 ## 保持不变
@@ -66,7 +67,7 @@ final 匹配损失仍通过帧相似度训练主编码器。
 
 ## 配置、checkpoint 与启动
 
-- 当前 `sav.yaml`：m/ρ 都开，独立输出目录，默认从头训练。
+- `sav_text_concat_s1_m_rho_on.yaml`：m/ρ 都开，保留原输出目录，默认从头训练。
 - `sav_text_concat_s1_base.yaml`：切换前 sav 的完整有效配置，仍输出 `output/sav`。
 - `sav_text_concat_s1_fast.yaml`、S32 和全部旧 early-route 配置保持切换前的有效值。
 - v1 签名 `[1,1,1,1]`；双判断 v2 签名 `[2,1,1,1,1,1]`。不能交叉 resume/eval。
@@ -78,18 +79,18 @@ final 匹配损失仍通过帧相似度训练主编码器。
 先 dry-run（只打印启动命令）：
 
 ```bash
-/home/duanwei/miniconda3/envs/trokens/bin/python tools/run_local.py --cfg configs/trokens/sav.yaml --gpus 0,1 --dry-run
+/home/duanwei/miniconda3/envs/trokens/bin/python tools/run_local.py --cfg configs/trokens/sav_text_concat_s1_m_rho_on.yaml --gpus 0,1 --dry-run
 ```
 
 正式启动（先确认 GPU 空闲；本次未自动执行）：
 
 ```bash
-OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/duanwei/miniconda3/envs/trokens/bin/python tools/run_local.py --cfg configs/trokens/sav.yaml --gpus 0,1
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/duanwei/miniconda3/envs/trokens/bin/python tools/run_local.py --cfg configs/trokens/sav_text_concat_s1_m_rho_on.yaml --gpus 0,1
 ```
 
-可复用既有 `tools/smoke_label_pre_temporal.py` 做有限步检查；默认合成输入，
-`--real-data` 使用本地冻结骨干和真实 SAV。不下载、不保存 checkpoint、不训练完整 epoch。
-正确性测试和有限步更新不证明准确率提升；仍需独立对照实验。
+旧有限步测速工具已在统一消融清理中移除。当前使用
+`tests/test_ablation_switches.py` 检查开关、匹配、损失及 CPU DDP；
+使用方法见[统一消融说明](sav_ablation.md)。这些测试不证明 GPU 性能或准确率提升。
 
 ## 原适配实现验证（2026-10-24，恢复前记录）
 

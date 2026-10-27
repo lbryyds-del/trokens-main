@@ -8,6 +8,7 @@ import sys
 
 import trokens.utils.checkpoint as cu
 from trokens.config.defaults import get_cfg
+from trokens.config.ablation import resolve_ablation_cfg
 
 
 def parse_args():
@@ -109,6 +110,8 @@ def load_config(args):
     if hasattr(args, "output_dir"):
         cfg.OUTPUT_DIR = args.output_dir
 
+    # Validate role/judgment dependencies before creating output directories.
+    resolve_ablation_cfg(cfg)
     # Create the checkpoint dir.
     cu.make_checkpoint_dir(cfg.OUTPUT_DIR)
     return cfg

@@ -1,8 +1,24 @@
 TASK: few_shot
 NUM_GPUS: 1
-OUTPUT_DIR: output/savo
+OUTPUT_DIR: output/sav
 
 FEW_SHOT:
+  # 消融只改这四项；m / rho(p) 要求 QUERY_ENABLE=True，否则启动报错。
+  # Query 关：1:K；Query 开：K:K 同类匹配。Support 独立控制。
+  DECOUPLING:
+    QUERY_ENABLE: False
+    SUPPORT_ENABLE: False
+    M_ENABLE: False
+    RHO_ENABLE: False
+  # 至少开一个判断时使用以下权重；都关自动变为 base=1, final=0, 辅助=0。
+  MATCHING:
+    LOGIT_SCALE: 10.0
+    LOGIT_BIAS: -2.0
+    BASE_LOSS_WEIGHT: 0.6
+    FINAL_LOSS_WEIGHT: 0.4
+    M_AUX_WEIGHT: 0.05
+    RHO_AUX_WEIGHT: 0.05
+    TRANSPORT_STRENGTH: 1.0
   N_WAY: 5
   K_SHOT: 1
   TRAIN_QUERY_PER_CLASS: 6
@@ -11,75 +27,32 @@ FEW_SHOT:
   TEST_EPISODES: 10000
   CLASS_LOSS_LAMBDA: 1.0
   Q2S_LOSS_LAMBDA: 1.0
-  # Same candidate text for Support and Query. No early routing/gates.
-  LABEL_PRE_TEMPORAL:
-    ENABLE: False
   TEXT_CONCAT_ST:
-    ENABLE: True
+    # 解耦开启侧：时间/空间各拼一个文本；关闭侧：无文本、视觉 patch 均值。
     TEMPORAL_TEXT_TOKENS: 1
     SPATIAL_TEXT_TOKENS: 1
-    READOUT: spatial_text_attention
-    # Validated on idle 40GB GPUs: retain attention, recompute MLP/readout.
     CLASS_CHUNK_SIZE: 5
     VIDEO_CHUNK_SIZE: 8
     ACTIVATION_CHECKPOINT: False
     MLP_CHECKPOINT: True
     READOUT_CHECKPOINT: True
     CACHE_FROZEN_TEXT: True
-  SUPPORT_TEXT_FUSION:
-    ENABLE: False
-    TEXT_WEIGHT: 1.0
-    VISUAL_WEIGHT: 1.0
-    VISUAL_DETACH: True
-  POT_ROUTE:
-    ENABLE: False
-    FRAME_SOFTMAX_TAU: 0.04
-    QUERY_PARTIAL_ENABLE: True
-    QUERY_PARTIAL_LOGIT_ALPHA: 10.0
-    QUERY_PARTIAL_LOGIT_BIAS: -2.0
   QUERY_CLASS_MATCHABILITY:
-    # Raw relation-decision m and same-spatial-readout Post metric rho.
-    ENABLE: True
+    # 判断模块的结构/执行参数；开关、匹配修正和损失由上面四项统一推导。
     LEARNED_VERIFIER:
-      # Same Raw/text/Support reader; direct learned quality decision (v5).
-      # semantic_relation restores the old v3 head for controlled comparisons.
       QUALITY_MODE: relation_decision
-      QUALITY_HIDDEN_DIM: 64
       QUALITY_DECISION_LOCAL_DIM: 32
       QUALITY_DECISION_READOUT_DIM: 16
       QUALITY_PATCH_TEMPERATURE: 0.07
       QUALITY_REFERENCE_TEMPERATURE: 0.10
-      QUALITY_MAX_POOL_DELTA: 0.5
-      QUALITY_MAX_REFERENCE_DELTA: 0.5
-      # Used only by semantic_relation, ignored by relation_decision.
-      QUALITY_MAX_EVIDENCE_DELTA: 0.10
-      QUALITY_SCALE_INIT: 10.0
-      QUALITY_BIAS_INIT: 0.0
-      QUALITY_RELATION_STRENGTH: 0.0
-      # Post cosine evidence with learned smooth pooling/calibration.
       METRIC_TEMPERATURE_INIT: 0.10
       METRIC_SCALE_INIT: 10.0
       DETACH_INPUTS: True
       WEIGHT_DECAY: 0.01
-      SEMANTIC_MIL_WEIGHT: 0.05
-      RELATION_MIL_WEIGHT: 0.05
       TRANSPORT_WARMUP_FRACTION: 0.05
       QUERY_CHUNK_SIZE: 16
       ACTIVATION_CHECKPOINT: False
       AMP_ENABLE: True
-    QUALITY_ENABLE: True
-    UNIQUENESS_ENABLE: True
-    # Apply m*rho before temporal maxima; train with the existing 5% warmup.
-    ABSOLUTE_MASS_TRANSPORT_STRENGTH: 1.0
-    # At m=0 positive similarities become zero; one-sided transport retains
-    # negative similarities. The existing q2s bias remains unchanged.
-    ABSOLUTE_MASS_UNMATCHED_COST: 0.0
-    ABSOLUTE_MASS_ONE_SIDED: True
-    # L_global + .6 L_base + .4 L_final + .05 L_m_MIL + .05 L_rho_MIL.
-    BASE_ONLY_LOSS_ENABLE: False
-    DUAL_LOGIT_LOSS_ENABLE: True
-    BASE_LOGIT_LOSS_WEIGHT: 0.60
-    VERIFIED_LOGIT_LOSS_WEIGHT: 0.40
 POINT_INFO:
   NAME: cotracker3_bip_fr_32_feat_dinotxt_vitl14reg4_fps_10
   PT_FIX_SAMPLING_TRAIN: True

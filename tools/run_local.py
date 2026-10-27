@@ -133,6 +133,18 @@ def main():
 
     gpu_ids = _split_gpus(args.gpus)
 
+    # Validate YAML + CLI switches even for --dry-run, before spawning workers.
+    sys.path.insert(0, str(repo_root))
+    from trokens.config.defaults import get_cfg
+    from trokens.config.ablation import resolve_ablation_cfg, ablation_summary
+    checked_cfg = get_cfg()
+    checked_cfg.merge_from_file(str(cfg_path))
+    extra_opts = args.opts[1:] if args.opts and args.opts[0] == '--' else args.opts
+    if extra_opts:
+        checked_cfg.merge_from_list(extra_opts)
+    resolve_ablation_cfg(checked_cfg)
+    print(ablation_summary(checked_cfg), flush=True)
+
     output_dir = None
     if args.output_dir:
         output_dir = Path(args.output_dir)

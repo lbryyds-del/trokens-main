@@ -1,0 +1,9 @@
+# Controlled no-disentanglement ablation, not the historical ReLU/distance scorer.
+# Both roles: ordinary space-time encoding, visual mean per frame, visual CLS.
+# Keep m/rho OFF and exactly L_global + L_base with the current 10*BiMHM-2 logits.
+_BASE_: sav_text_concat_shared_query.yaml
+OUTPUT_DIR: output/sav_shared_support_query_m_rho_off
+FEW_SHOT:
+  TEXT_CONCAT_ST:
+    SHARED_QUERY_ENABLE: True
+    SHARED_SUPPORT_ENABLE: True
