@@ -272,6 +272,7 @@ def test_invalid_switches_fail_before_model_loading_or_output_creation(tmp_path,
     from trokens.utils import parser
     cfg = get_cfg()
     cfg.merge_from_file(str(CONFIG))
+    cfg.FEW_SHOT.DECOUPLING.QUERY_ENABLE = False
     cfg.FEW_SHOT.DECOUPLING.M_ENABLE = True
     with pytest.raises(ValueError, match='require QUERY_ENABLE=True'):
         Pointformer(cfg)  # validation precedes frozen-backbone initialization
@@ -279,7 +280,8 @@ def test_invalid_switches_fail_before_model_loading_or_output_creation(tmp_path,
         raise AssertionError('Invalid configuration must not create checkpoints')
     monkeypatch.setattr(parser.cu, 'make_checkpoint_dir', forbidden)
     args = SimpleNamespace(cfg_file=str(CONFIG), output_dir=str(tmp_path / 'absent'),
-                           opts=['FEW_SHOT.DECOUPLING.M_ENABLE', 'True'])
+                           opts=['FEW_SHOT.DECOUPLING.QUERY_ENABLE', 'False',
+                                 'FEW_SHOT.DECOUPLING.M_ENABLE', 'True'])
     with pytest.raises(ValueError, match='require QUERY_ENABLE=True'):
         parser.load_config(args)
     assert not (tmp_path / 'absent').exists()
@@ -396,8 +398,11 @@ def test_default_branch_rejects_old_calibrated_shared_checkpoint():
             validate_label_pre_temporal_checkpoint(destination, source.state_dict())
 
 
-def test_default_constructor_skips_text_and_matches_explicit_original_initialization(monkeypatch):
-    cfg = _cfg((False, False, False, False))
+@pytest.mark.parametrize('dataset', ['sav', 'tinyvirat'])
+def test_main_constructor_enables_motion_skips_text_and_matches_original(dataset, monkeypatch):
+    cfg = get_cfg()
+    cfg.merge_from_file(str(CONFIG.with_name(dataset + '.yaml')))
+    resolve_ablation_cfg(cfg)
     original = cfg.clone()
     for name in original.FEW_SHOT.DECOUPLING:
         original.FEW_SHOT.DECOUPLING[name] = None
@@ -423,11 +428,57 @@ def test_default_constructor_skips_text_and_matches_explicit_original_initializa
     assert not baseline.use_text_concat_st and not baseline.use_label_text_features
     assert not baseline.use_query_partial_q2s and not baseline.use_frame_softmax_route
     assert baseline.text_concat_st is None and baseline.query_evidence_verifier is None
+    assert isinstance(baseline.hod_motion_module, nn.Module)
+    assert isinstance(baseline.cross_motion_module, nn.Module)
     assert not hasattr(baseline, 'dinotxt_text_model')
     assert not hasattr(baseline, 'dinotxt_tokenizer')
     assert baseline.state_dict().keys() == reference.state_dict().keys()
     for name, value in baseline.state_dict().items():
         torch.testing.assert_close(value, reference.state_dict()[name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('dataset', ['sav', 'tinyvirat'])
+def test_text_ablation_constructor_keeps_both_judgments_but_never_builds_motion(dataset, monkeypatch):
+    cfg = get_cfg()
+    cfg.merge_from_file(str(CONFIG.with_name(dataset + '.yaml')))
+    # Explicit no-motion ablation remains supported independently of the defaults.
+    for name in cfg.FEW_SHOT.DECOUPLING:
+        cfg.FEW_SHOT.DECOUPLING[name] = True
+    cfg.MODEL.MOTION_MODULE.USE_HOD_MOTION_MODULE = False
+    cfg.MODEL.MOTION_MODULE.USE_CROSS_MOTION_MODULE = False
+    # Stub only external pretrained resources, retaining the real constructor.
+    for name in ('_load_dinotxt_visual_model', '_load_dinotxt_text_model', '_load_dinotxt_tokenizer'):
+        monkeypatch.setattr(Pointformer, name, lambda self: nn.Identity())
+    monkeypatch.setattr(Pointformer, '_load_atomic_label_names',
+                        lambda self: [str(i) for i in range(self.num_classes)])
+    monkeypatch.setattr(Pointformer, '_load_label_prompt_groups',
+                        lambda self: [[name] for name in self.atomic_label_names])
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Disabled HoD/CTD must not be constructed')
+    monkeypatch.setattr('trokens.models.pointformer.HODMotionModule', forbidden)
+    monkeypatch.setattr('trokens.models.pointformer.CrossMotionModule', forbidden)
+    model = Pointformer(cfg)
+    assert model.use_text_concat_st and model.use_label_text_features
+    assert model.query_evidence_verifier.quality
+    assert model.query_evidence_verifier.uniqueness
+    assert not hasattr(model, 'hod_motion_module')
+    assert not hasattr(model, 'cross_motion_module')
+
+
+def test_text_ablation_forward_without_motion_keeps_m_rho_and_finite_gradients():
+    model = _model((True, True, True, True)).train()
+    features, _, metadata = _episode()
+    features.requires_grad_()
+    # No motion modules or HoD inputs exist in this fixture: forward must skip them.
+    assert 'hod_feat' not in metadata
+    output = model({'video': features, 'metadata': metadata})
+    assert 'query_quality_logits' in output and 'query_relation_logits' in output
+    assert output['query_partial_q2s_logits'].shape == (2, 2)
+    assert torch.isfinite(output['query_partial_q2s_logits']).all()
+    loss, _, metrics = _loss(model, output, metadata)
+    assert 'q2s_quality_mil_loss' in metrics and 'q2s_relation_mil_loss' in metrics
+    loss.backward()
+    assert torch.isfinite(features.grad).all() and features.grad.abs().sum() > 0
 
 
 class _DDPEpisode(nn.Module):

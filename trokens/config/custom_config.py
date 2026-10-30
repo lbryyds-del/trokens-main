@@ -30,13 +30,14 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.TRAIN_OG_EPISODES = False
     cfg.FEW_SHOT.CLASS_LOSS_LAMBDA = 1.0
     cfg.FEW_SHOT.Q2S_LOSS_LAMBDA = 1.0
-    # None leaves archived/other-dataset configs untouched. SAV specifies all
+    # None leaves archived/other-dataset configs untouched. Main profiles specify all
     # four booleans; resolve_ablation_cfg derives legacy flags and loss weights.
     cfg.FEW_SHOT.DECOUPLING = CfgNode()
     cfg.FEW_SHOT.DECOUPLING.QUERY_ENABLE = None
     cfg.FEW_SHOT.DECOUPLING.SUPPORT_ENABLE = None
     cfg.FEW_SHOT.DECOUPLING.M_ENABLE = None
     cfg.FEW_SHOT.DECOUPLING.RHO_ENABLE = None
+    # Internal matching defaults; no duplicate block in the main dataset YAMLs.
     cfg.FEW_SHOT.MATCHING = CfgNode()
     cfg.FEW_SHOT.MATCHING.LOGIT_SCALE = 10.0
     cfg.FEW_SHOT.MATCHING.LOGIT_BIAS = -2.0

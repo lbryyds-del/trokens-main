@@ -3,68 +3,50 @@ NUM_GPUS: 1
 OUTPUT_DIR: output/tinyvirat
 
 FEW_SHOT:
+  DECOUPLING:
+    QUERY_ENABLE: False
+    SUPPORT_ENABLE: False
+    M_ENABLE: False
+    RHO_ENABLE: False
   N_WAY: 5
-  K_SHOT: 3
+  K_SHOT: 1
   TRAIN_QUERY_PER_CLASS: 6
   TEST_QUERY_PER_CLASS: 1
   TRAIN_EPISODES: 2000
   TEST_EPISODES: 10000
-  SUPPORT_TEXT_FUSION:
-    ENABLE: True
-    TEXT_WEIGHT: 1.0
-    VISUAL_WEIGHT: 1.0
-    VISUAL_DETACH: True
-  POT_ROUTE:
-    ENABLE: True
-    FRAME_SOFTMAX_TAU: 0.04
-    QUERY_PARTIAL_ENABLE: True
-    QUERY_PARTIAL_LOGIT_ALPHA: 10.0
-    QUERY_PARTIAL_LOGIT_BIAS: -2.0
-  # Use the default Query evidence path.
+  CLASS_LOSS_LAMBDA: 1.0
+  Q2S_LOSS_LAMBDA: 1.0
+  TEXT_CONCAT_ST:
+    TEMPORAL_TEXT_TOKENS: 1
+    SPATIAL_TEXT_TOKENS: 1
+    CLASS_CHUNK_SIZE: 5
+    VIDEO_CHUNK_SIZE: 8
+    ACTIVATION_CHECKPOINT: False
+    MLP_CHECKPOINT: True
+    READOUT_CHECKPOINT: True
+    CACHE_FROZEN_TEXT: True
   QUERY_CLASS_MATCHABILITY:
-    ENABLE: True
     LEARNED_VERIFIER:
-      # Raw semantic quality with a bounded Support relation correction.
-      QUALITY_HIDDEN_DIM: 64
+      QUALITY_MODE: relation_decision
+      QUALITY_DECISION_LOCAL_DIM: 32
+      QUALITY_DECISION_READOUT_DIM: 16
       QUALITY_PATCH_TEMPERATURE: 0.07
       QUALITY_REFERENCE_TEMPERATURE: 0.10
-      QUALITY_MAX_POOL_DELTA: 0.5
-      QUALITY_MAX_REFERENCE_DELTA: 0.5
-      QUALITY_MAX_EVIDENCE_DELTA: 0.10
-      QUALITY_SCALE_INIT: 10.0
-      QUALITY_BIAS_INIT: 0.0
-      QUALITY_RELATION_STRENGTH: 1.0
-      # Post cosine evidence with learned smooth pooling/calibration.
       METRIC_TEMPERATURE_INIT: 0.10
       METRIC_SCALE_INIT: 10.0
       DETACH_INPUTS: True
       WEIGHT_DECAY: 0.01
-      SEMANTIC_MIL_WEIGHT: 0.05
-      RELATION_MIL_WEIGHT: 0.05
       TRANSPORT_WARMUP_FRACTION: 0.05
       QUERY_CHUNK_SIZE: 16
       ACTIVATION_CHECKPOINT: False
       AMP_ENABLE: True
-    # Only toggle these two flags for quality / uniqueness ablations.
-    QUALITY_ENABLE: True
-    UNIQUENESS_ENABLE: True
-    # Transport g=m*rho before both BiMHM reductions.
-    ABSOLUTE_MASS_TRANSPORT_STRENGTH: 1.0
-    # At m=0 the visual match is neutral (cosine 0), then the existing -2
-    # q2s bias still applies.
-    ABSOLUTE_MASS_UNMATCHED_COST: 0.0
-    ABSOLUTE_MASS_ONE_SIDED: True
-    # Train both the untouched base matcher and the verified matcher.
-    DUAL_LOGIT_LOSS_ENABLE: True
-    BASE_LOGIT_LOSS_WEIGHT: 0.60
-    VERIFIED_LOGIT_LOSS_WEIGHT: 0.40
 POINT_INFO:
   NAME: cotracker3_bip_fr_32_feat_dinotxt_vitl14reg4_fps_10
   PT_FIX_SAMPLING_TRAIN: True
   PT_FIX_SAMPLING_TEST: True
   USE_PT_QUERY_MASK: True
-  # Spatial routing uses visible points, including backward-tracked points.
-  QUERY_MASK_MODE: visibility
+  # Spatial readout uses all points; tracker visibility remains separate.
+  QUERY_MASK_MODE: all
   SAMPLING_TYPE: cluster_sample
   NUM_POINTS_TO_SAMPLE: 256
 

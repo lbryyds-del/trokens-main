@@ -3,27 +3,13 @@ NUM_GPUS: 1
 OUTPUT_DIR: output/sav
 
 FEW_SHOT:
-  # Query/Support 都关：自动回到原始 Trokens pt_forward、聚合及匹配 BCE。
-  # 任意一侧开：使用文本解耦路径和 scale*S+bias，无需另切匹配模式。
-  # m / rho(p) 要求 QUERY_ENABLE=True，否则启动报错。
-  # Query 关：1:K；Query 开：K:K 同类匹配。Support 独立控制。
   DECOUPLING:
     QUERY_ENABLE: False
     SUPPORT_ENABLE: False
     M_ENABLE: False
     RHO_ENABLE: False
-  # 至少开一个判断时使用以下权重；都关自动变为 base=1, final=0, 辅助=0。
-  MATCHING:
-    # 仅解耦路径使用；两侧都关的原始匹配不读取 scale/bias。
-    LOGIT_SCALE: 10.0
-    LOGIT_BIAS: -2.0
-    BASE_LOSS_WEIGHT: 0.6
-    FINAL_LOSS_WEIGHT: 0.4
-    M_AUX_WEIGHT: 0.05
-    RHO_AUX_WEIGHT: 0.05
-    TRANSPORT_STRENGTH: 1.0
   N_WAY: 5
-  K_SHOT: 1
+  K_SHOT: 3
   TRAIN_QUERY_PER_CLASS: 6
   TEST_QUERY_PER_CLASS: 1
   TRAIN_EPISODES: 2000
@@ -31,8 +17,6 @@ FEW_SHOT:
   CLASS_LOSS_LAMBDA: 1.0
   Q2S_LOSS_LAMBDA: 1.0
   TEXT_CONCAT_ST:
-    # 解耦开启侧：时间/空间各拼一个文本；单侧关闭：无文本、视觉 patch 均值。
-    # 两侧都关则整个 TEXT_CONCAT_ST 停用，以下分块/checkpoint 配置不参与原始支路。
     TEMPORAL_TEXT_TOKENS: 1
     SPATIAL_TEXT_TOKENS: 1
     CLASS_CHUNK_SIZE: 5
@@ -42,7 +26,6 @@ FEW_SHOT:
     READOUT_CHECKPOINT: True
     CACHE_FROZEN_TEXT: True
   QUERY_CLASS_MATCHABILITY:
-    # 判断模块的结构/执行参数；开关、匹配修正和损失由上面四项统一推导。
     LEARNED_VERIFIER:
       QUALITY_MODE: relation_decision
       QUALITY_DECISION_LOCAL_DIM: 32
@@ -62,7 +45,7 @@ POINT_INFO:
   PT_FIX_SAMPLING_TRAIN: True
   PT_FIX_SAMPLING_TEST: True
   USE_PT_QUERY_MASK: True
-  # Spatial readout uses all points; motion keeps its original visibility.
+  # Spatial readout uses all points; tracker visibility remains separate.
   QUERY_MASK_MODE: all
   SAMPLING_TYPE: cluster_sample
   NUM_POINTS_TO_SAMPLE: 256

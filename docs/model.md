@@ -1,16 +1,16 @@
 # 默认模型与数据集配置
 
-当前 SAV 使用[统一的四项消融开关](sav_ablation.md)，默认 Support / Query 文本解耦及 m/ρ 全关闭。
-历史前置对照仍保留在 `sav_label_pre_temporal*.yaml`；TinyVIRAT 未改结构。
+当前 SAV 与 TinyVIRAT 使用[统一的四项消融开关](sav_ablation.md)，默认 Support / Query 文本解耦及 m/ρ(p) 全关闭，HoD / CTD（CrossMotion）全开启。
+两份主配置的公共训练/模型设置一致；历史对照配置未修改。
 
-## 默认全关闭组合的数据流
+## 默认无解耦、双运动模块数据流
 
-1. 冻结的 DinoTxt 提供视觉特征，读取已有轨迹缓存；不调用类别文本编码。
-2. 保留位置编码、CrossMotion、HoD；Support / Query 都不使用文本。
-3. 每个视频只运行一次普通时空 self-attention，两侧共享参数，不复制类别分支。
-4. 两侧每帧对 Norm 后的视觉 patch 求均值，正 Support 类内平均；视觉 CLS 单独用于全局分类。
-5. 一份 Query 特征与全部 Support 类原型进行 BiMHM 匹配，保留 `10*S-2` 分数尺度；
-   不构建 m/ρ 判断头，不做其匹配修正或辅助损失。
+1. 冻结的 DinoTxt 提供视觉特征，读取已有轨迹缓存；不加载类别文本编码器。
+2. 外观特征叠加 CrossMotion、HoD 运动特征，保留位置编码。
+3. Support / Query 均走原始 `pt_forward`，不拼文本、不复制类别分支。
+4. 正 Support 类内先平均视觉 patch；Support 原型和 Query 各自经过 ReLU，再做空间均值。
+5. 使用原始负双向最近帧距离匹配，不使用 `10*S-2`；保留全局分类和原始匹配 BCE，
+   不创建 m/ρ 判断头，不做匹配修正或辅助损失。
 
 模型只使用 Support 标签和 episode 候选类别。Query 真值用于损失与指标计算。
 
@@ -32,17 +32,17 @@
 原 32 份版本保留为 `configs/trokens/sav_text_concat_s32.yaml`，两种 token 数量的 checkpoint 不可混用。
 
 - 训练协议：5-way、1-shot，每类 6 个训练 Query；每轮 2000 个训练 episode，10000 个测试 episode，20 轮训练。
-- 轨迹：每段 8 帧、256 个点，空间读出采用 `QUERY_MASK_MODE: all`；运动仍使用真实可见性。
-- 编码：`DECOUPLING.QUERY_ENABLE` / `SUPPORT_ENABLE` 独立控制两侧；当前均关闭，使用通用编码。
-- 判断：`DECOUPLING.M_ENABLE` / `RHO_ENABLE` 当前均关闭，匹配修正及两个 MIL 权重自动归零。
-- 监督：global BCE + base BCE；base/final 分数相同，不重复计算 final BCE。
+- 轨迹：每段 8 帧、256 个点，空间读出采用 `QUERY_MASK_MODE: all`；轨迹缓存和独立可见性信息保留。
+- 编码：`DECOUPLING.QUERY_ENABLE` / `SUPPORT_ENABLE` 独立控制两侧，当前均关闭。
+- 判断：`DECOUPLING.M_ENABLE` / `RHO_ENABLE` 当前均关闭，transport 和两个辅助权重自动归零。
+- 运动：HoD 和 CTD（CrossMotion）均开启。
+- 监督：`L_global + L_original_q2s_BCE`，无重复 final BCE。
 - 优化：AdamW、cosine，学习率 `1e-4`，5 轮 warmup，梯度累积 2 步。
-- 执行：每块 8 视频，关闭完整块 checkpoint，仅保留 MLP/readout 重算。
-  双侧通用模式下不运行类别分块、文本编码/缓存或文本权重读出；配置中的相关旧值不生效。
-  原 fast 配置仍固定为双侧拼接、m/ρ 关闭版。
+- 执行：原始支路不使用 `TEXT_CONCAT_ST` 的分块/checkpoint 或文本缓存设置。
+  历史 fast 配置仍固定为双侧拼接、m/ρ 关闭版。
 
 内部 `TEXT_CONCAT_ST.ENABLE`、shared 和 loss 标志由四个公开开关统一生成，不在 sav 中重复配置。
-这是当前框架的无解耦 baseline，仍使用 `10*S-2` 和 base BCE，未回退到历史 ReLU/负双向距离打分。
+当前为无解耦、含运动模块的原始匹配 baseline；不代表复现历史整套训练协议。详见消融说明。
 
 每个进程每步处理一个 episode；有效全局 episode 数为进程数乘以梯度累积步数。通用 `TRAIN/TEST.BATCH_SIZE` 不控制这里的 episode 大小。
 
@@ -54,17 +54,22 @@ SAV YAML 已移除旧评分阈值、Top-K 校准、旧模型选择项、关闭�
 
 ```bash
 /home/duanwei/miniconda3/envs/trokens/bin/python tools/run_local.py \
-  --cfg configs/trokens/sav.yaml --gpus 0
+  --cfg configs/trokens/sav.yaml --gpus 0,1 \
+  --output-dir output/sav_no_decoupling_hod_ctd_1shot
 ```
 
 实际 GPU 数由启动参数决定，训练前按实验协议设置 `GRAD_ACCUM_STEPS`。
 
-当前双侧通用路径签名为 `[5,0,0,1]`。真正续训/评估必须加载同结构完整参数；
-不能直接加载旧前置路由或文本拼接 v1/v2/v3/v4 checkpoint，本组配置默认从头训练。
-原 v2 的显式 v1 初始化规则仍仅适用于保留的 m/ρ 开启版，不适用于当前双侧通用路径。
+真正续训/评估必须加载同结构完整参数，角色/判断开关及架构签名需要一致。
+本组配置默认从头训练，不自动恢复旧 checkpoint；新实验请使用未占用的独立输出目录。
+当前不应把文本解耦、m/ρ 开启或关闭运动模块的模型权重直接当作同结构续训。
 
 ## TinyVIRAT 配置
 
-入口为 `configs/trokens/tinyvirat.yaml`，输出为 `output/tinyvirat`。旧启发式路径已随清理删除，入口改用相同的默认质量／独特性模块；其旧实验结果和旧检查点不代表当前配置，需要重新训练。
+入口为 `configs/trokens/tinyvirat.yaml`，默认输出仍为 `output/tinyvirat`。
+Tiny 已对齐 SAV 的 5-way 1-shot、双侧文本解耦及 m/ρ 关闭、HoD/CTD 开启设置。
+每轮 2000 个训练 episode、10000 个测试 episode、20 轮及学习率策略不变。
 
-配置按 SAV 的标准移除未使用与关闭的选项，保留 TinyVIRAT 的数据路径、21 类描述及顺序、类别划分和 3-shot 协议。空间路由使用 `QUERY_MASK_MODE: visibility`，测试使用 `DROP_EMPTY_QUERY_ROWS: True`。RandAugment 仍由 `DATA.USE_RAND_AUGMENT` 控制。
+保留 TinyVIRAT 的数据/轨迹路径、21 类及顺序、12/9 类划分和 105 条独立文本描述。
+空间读出使用 `QUERY_MASK_MODE: all`，测试仍为 `DROP_EMPTY_QUERY_ROWS: True`，SAV 仍为 False。
+旧前置路由/Support 文本融合配置已被统一开关替代；RandAugment 仍由 `DATA.USE_RAND_AUGMENT` 控制。

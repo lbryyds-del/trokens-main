@@ -3,7 +3,7 @@
 统一入口：`configs/trokens/sav.yaml`，只改下面四项，不再手工同步旧 shared、
 判断头、transport、base/final 或 MIL 开关。Query/Support 都关时自动回到原始
 Trokens 默认支路和匹配 BCE；任意一侧开启则保留现有解耦匹配，不另设匹配模式。
-当前四项全部关闭；修改配置不会自动启动或重启训练。
+当前 SAV / TinyVIRAT 两份主配置四项全部关闭，HoD / CTD 全开启；修改配置不会自动启动或重启训练。
 
 ```yaml
 FEW_SHOT:
@@ -12,6 +12,10 @@ FEW_SHOT:
     SUPPORT_ENABLE: False
     M_ENABLE: False
     RHO_ENABLE: False  # rho，即讨论中的 p
+MODEL:
+  MOTION_MODULE:
+    USE_HOD_MOTION_MODULE: True
+    USE_CROSS_MOTION_MODULE: True  # CTD
 ```
 
 ## 编码与匹配
@@ -87,8 +91,8 @@ Query 真值不参与编码或聚合。
 one-sided 匹配机制或未知标签屏蔽。它不是额外增加一份独立的“m 匹配损失”：
 m/rho 共同决定 final 匹配分数，final BCE 监督这个分数，各头另有各自的 MIL。
 
-`FEW_SHOT.MATCHING` 中 `.6/.4/.05/.05` 是**开启时**的权重设定。
-即便配置保留这些数，关闭的头/损失也不会执行。实际生效值在启动日志的
+匹配数值统一在 `trokens/config/custom_config.py` 中维护，SAV/Tiny YAML 不再重复列出
+`MATCHING`。`.6/.4/.05/.05` 仅在对应开关开启时使用；关闭的头/损失不会执行。实际生效值在启动日志的
 `QUERY_CLASS_MATCHABILITY` 中展开，启动器同时打印简短说明。
 `CLASS_LOSS_LAMBDA` 乘 `L_global`；`Q2S_LOSS_LAMBDA` 乘整个匹配与 MIL 之和，当前均为 1。
 
@@ -110,7 +114,7 @@ Query 关而 m/rho 开属于非法组合，配置解析直接报错，不偷偷�
 
 ```bash
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /home/duanwei/miniconda3/envs/trokens/bin/python tools/run_local.py \
-  --cfg configs/trokens/sav.yaml --gpus 0,1 --output-dir output/sav_q0_s0_trokens_default
+  --cfg configs/trokens/sav.yaml --gpus 0,1 --output-dir output/sav_no_decoupling_hod_ctd_1shot
 ```
 
 仍为从头训练（`AUTO_RESUME=False`、`NEW_TRAIN=True`、空 checkpoint 路径）。

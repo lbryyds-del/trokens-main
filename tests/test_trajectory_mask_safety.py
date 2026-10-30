@@ -41,7 +41,7 @@ def test_visibility_keeps_backward_observations_but_not_invisible_points():
         _build_point_query_mask(seeds, visible, "guess_from_key")
 
 
-@pytest.mark.parametrize("ds,mask_mode", [("sav", "all"), ("tinyvirat", "visibility")])
+@pytest.mark.parametrize("ds,mask_mode", [("sav", "all"), ("tinyvirat", "all")])
 def test_datasets_keep_explicit_mask_policy_and_fresh_training(ds, mask_mode):
     cfg = get_cfg()
     cfg.merge_from_file(f"configs/trokens/{ds}.yaml")
@@ -53,9 +53,9 @@ def test_datasets_keep_explicit_mask_policy_and_fresh_training(ds, mask_mode):
     visibility = torch.tensor([[True, False], [False, False], [True, True]])
     original_visibility = visibility.clone()
     mask = _build_point_query_mask([2, 2], visibility, cfg.POINT_INFO.QUERY_MASK_MODE)
-    expected = torch.ones_like(visibility) if ds == "sav" else visibility
+    expected = torch.ones_like(visibility)
     assert torch.equal(mask, expected)
-    # Restoring SAV routing must not overwrite the separate tracker visibility.
+    # Shared all-point readout must not overwrite the separate tracker visibility.
     assert torch.equal(visibility, original_visibility)
 
 
