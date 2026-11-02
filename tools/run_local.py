@@ -21,7 +21,7 @@ DEFAULT_GPUS = "0,1"
 
 
 def _default_master_port():
-    return int(os.environ.get("MASTER_PORT") or (20000 + secrets.randbelow(10000)))
+    return int(os.environ.get("MASTER_PORT") or (20000 + secrets.randbelow(10000)))                     
 
 
 def _split_gpus(gpus):
@@ -137,12 +137,14 @@ def main():
     sys.path.insert(0, str(repo_root))
     from trokens.config.defaults import get_cfg
     from trokens.config.ablation import resolve_ablation_cfg, ablation_summary
+    from trokens.config.feature_scale import validate_feature_scale_cfg
     checked_cfg = get_cfg()
     checked_cfg.merge_from_file(str(cfg_path))
     extra_opts = args.opts[1:] if args.opts and args.opts[0] == '--' else args.opts
     if extra_opts:
         checked_cfg.merge_from_list(extra_opts)
     resolve_ablation_cfg(checked_cfg)
+    validate_feature_scale_cfg(checked_cfg)
     print(ablation_summary(checked_cfg), flush=True)
 
     output_dir = None

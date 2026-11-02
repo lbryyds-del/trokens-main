@@ -178,4 +178,11 @@ def add_custom_config(cfg):
     cfg.MODEL.MOTION_MODULE.USE_HOD_MOTION_MODULE = False
     cfg.MODEL.APPEARANCE_MODULE_DISABLE = False
 
+    # Fixed interface gains; archived profiles keep their original unit scale.
+    cfg.MODEL.FEATURE_SCALE = CfgNode()
+    cfg.MODEL.FEATURE_SCALE.ENABLE = False
+    cfg.MODEL.FEATURE_SCALE.APPEARANCE_GAIN = 1.0
+    cfg.MODEL.FEATURE_SCALE.HOD_GAIN = 1.0
+    cfg.MODEL.FEATURE_SCALE.CTD_GAIN = 1.0
+
     return cfg

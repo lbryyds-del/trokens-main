@@ -624,7 +624,9 @@ custom_config.add_custom_config(_C)
 def assert_and_infer_cfg(cfg):
     """Assert and infer the config."""
     from .ablation import resolve_ablation_cfg
+    from .feature_scale import validate_feature_scale_cfg
     resolve_ablation_cfg(cfg)
+    validate_feature_scale_cfg(cfg)
     # BN assertions.
     # TRAIN assertions.
     assert cfg.TRAIN.CHECKPOINT_TYPE in ["pytorch", "caffe2"]

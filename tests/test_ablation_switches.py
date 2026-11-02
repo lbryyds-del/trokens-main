@@ -42,6 +42,9 @@ def _model(flags, mode='selective', archived_shared=False):
     nn.Module.__init__(model)
     model.cfg = _cfg(flags)
     cfg = model.cfg
+    # Routing/matching oracles take already-scaled synthetic inputs. The real
+    # forward's scale interface is exercised separately in test_feature_scale.
+    cfg.MODEL.FEATURE_SCALE = get_cfg().MODEL.FEATURE_SCALE.clone()
     if archived_shared:
         # Explicit old v5 profile, not the new public four-switch baseline.
         for name in cfg.FEW_SHOT.DECOUPLING:

@@ -498,7 +498,9 @@ def load_checkpoint(
 
     # Account for the DDP wrapper in the multi-gpu setting.
     ms = model.module if data_parallel else model
+    from trokens.config.feature_scale import validate_feature_scale_checkpoint
     if convert_from_caffe2:
+        validate_feature_scale_checkpoint(ms, None, allow_change=epoch_reset)
         with pathmgr.open(path_to_checkpoint, "rb") as f:
             caffe2_checkpoint = pickle.load(f, encoding="latin1")
         state_dict = OrderedDict()
@@ -575,6 +577,7 @@ def load_checkpoint(
         # Load the checkpoint on CPU to avoid GPU mem spike.
         with pathmgr.open(path_to_checkpoint, "rb") as f:
             checkpoint = torch.load(f, map_location="cpu")
+        validate_feature_scale_checkpoint(ms, checkpoint.get("cfg"), allow_change=epoch_reset)
         model_state_dict_3d = (
             model.module.state_dict() if data_parallel else model.state_dict()
         )

@@ -1,6 +1,7 @@
+_BASE_: _base_/dinotxt_scaled.yaml
 TASK: few_shot
 NUM_GPUS: 1
-OUTPUT_DIR: output/tinyvirat
+OUTPUT_DIR: output/tinyvirat/dinotxt_scaled
 
 FEW_SHOT:
   DECOUPLING:

@@ -15,6 +15,7 @@ from torch.nn.init import trunc_normal_
 from trokens.models.attention import TrajectoryAttentionBlock
 from trokens.config.query_judgments import resolve_query_judgments
 from trokens.config.ablation import resolve_ablation_cfg
+from trokens.config.feature_scale import validate_feature_scale_cfg, feature_gain, scale_feature
 from trokens.models.query_evidence_verifier import QueryEvidenceVerifier, build_query_q2s_aux
 from trokens.models.text_concat_conditioning import TextConcatST, text_concat_episode
 from trokens.models.frozen_text_cache import FrozenLabelTextCache
@@ -34,6 +35,7 @@ class Pointformer(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         resolve_ablation_cfg(cfg)
+        validate_feature_scale_cfg(cfg)
         self.img_size = cfg.DATA.TRAIN_CROP_SIZE
         # self.patch_size = cfg.MF.PATCH_SIZE
         self.feat_extractor_type = cfg.MODEL.FEAT_EXTRACTOR
@@ -1873,6 +1875,10 @@ class Pointformer(nn.Module):
                         'b t p q d -> b t (p q) d',
                     )
 
+            # Scale raw visual tokens BEFORE positions, while keeping the raw
+            # semantic evidence above in the original DinoTxt feature space.
+            feat_to_use = scale_feature(
+                feat_to_use, feature_gain(self.cfg, "appearance"))
             if self.cfg.MF.USE_BASE_POS_EMBED:
                 feat_to_use = self.add_st_pos_embeddings(feat_to_use)
 
@@ -1900,10 +1906,13 @@ class Pointformer(nn.Module):
         inter_feat = None
         if self.cfg.MODEL.MOTION_MODULE.USE_HOD_MOTION_MODULE:
             intra_feat = self.hod_motion_module(metadata['hod_feat'].float())
+            intra_feat = scale_feature(intra_feat, feature_gain(self.cfg, "hod"))
 
         if self.cfg.MODEL.MOTION_MODULE.USE_CROSS_MOTION_MODULE:
             inter_feat = self.cross_motion_module(
                 metadata['pred_tracks'], metadata['pred_visibility'])
+            # Apply any motion gain AFTER the encoder's terminal LayerNorm.
+            inter_feat = scale_feature(inter_feat, feature_gain(self.cfg, "ctd"))
 
         reference_feat = app_feat
         if reference_feat is None:

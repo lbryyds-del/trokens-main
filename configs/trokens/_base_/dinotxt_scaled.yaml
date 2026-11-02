@@ -1,0 +1,13 @@
+# Shared interface copied from 172.24.2.14:/data1/xuxin/trokens-main.
+# g = RMS(DINOv2-B) / RMS(DinoTxt), measured BEFORE positional embeddings.
+# Calibrated on 64 Tiny TRAIN videos, 8 frames/video, seed=173:
+# RMS(DINOv2-B)=1.6704288672297176; RMS(DinoTxt)=0.17096768836648155.
+# SAV reuses this reference gain to test transfer; it is NOT SAV-calibrated.
+MODEL:
+  FEAT_EXTRACTOR: dinotxt_vitl14_reg4
+  TRAIN_BACKBONE: False
+  FEATURE_SCALE:
+    ENABLE: True
+    APPEARANCE_GAIN: 9.770436058356436
+    HOD_GAIN: 1.0
+    CTD_GAIN: 1.0

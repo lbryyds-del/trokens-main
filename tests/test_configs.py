@@ -56,7 +56,7 @@ def test_main_profiles_enable_motion_without_text_or_judgments(name):
     assert cfg.FEW_SHOT.TEST_EPISODES == 10000
     assert cfg.SOLVER.MAX_EPOCH == 20
     assert cfg.FEW_SHOT.CLASS_LOSS_LAMBDA == cfg.FEW_SHOT.Q2S_LOSS_LAMBDA == 1.
-    assert cfg.OUTPUT_DIR == f"output/{name}"
+    assert cfg.OUTPUT_DIR == f"output/{name}/dinotxt_scaled"
 
 
 @pytest.mark.parametrize("name", ["sav", "tinyvirat"])
@@ -90,6 +90,11 @@ def test_sav_retains_historical_training_protocol():
     cfg.merge_from_file(str(CONFIGS / "sav.yaml"))
     old.merge_from_file(str(CONFIGS / "sav_shared_support_query.yaml"))
     assert_and_infer_cfg(cfg)
+    # The interface gain is the only intentional model change from this
+    # historical profile; dataset, optimizer, shots and training stay intact.
+    assert cfg.MODEL.FEATURE_SCALE.ENABLE
+    assert not old.MODEL.FEATURE_SCALE.ENABLE
+    old.MODEL.FEATURE_SCALE = cfg.MODEL.FEATURE_SCALE.clone()
     for name in ("DATA", "MODEL", "MF", "POINT_INFO", "SOLVER", "TRAIN", "TEST", "DATA_LOADER"):
         assert cfg[name] == old[name]
 
