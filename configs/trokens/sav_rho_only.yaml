@@ -1,0 +1,8 @@
+# Matched baseline: same SAV protocol, no trajectory-change residuals.
+_BASE_: sav.yaml
+OUTPUT_DIR: output/sav/rho_only
+FEW_SHOT:
+  ENTITY_CHANGE:
+    ENABLE: False
+WANDB:
+  EXP_NAME: sav_rho_only

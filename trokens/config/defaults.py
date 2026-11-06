@@ -38,6 +38,10 @@ _C.TRAIN.EVAL_PERIOD = 10
 
 # Save model checkpoint every checkpoint period epochs.
 _C.TRAIN.CHECKPOINT_PERIOD = 10
+_C.TRAIN.CHECKPOINT_KEEP_ALL = False
+# Empty preserves the historical loader. Opt-in experiments can monitor dev
+# without changing the training pool or the final evaluation pool.
+_C.TRAIN.EVAL_DATA_CSV = ""
 
 # Keep one copy of the best checkpoint for each training run.
 _C.TRAIN.CHECKPOINT_ARCHIVE_BEST = True
@@ -140,6 +144,7 @@ _C.TEST.CHECKPOINT_TYPE = "pytorch"
 _C.TEST.SAVE_RESULTS_PATH = ""
 
 _C.TEST.TEST_EPOCH_NUM = -1
+_C.TEST.DATA_CSV = ""
 
 # Zero-based label ids used to report base/novel few-shot mAP for multi-label
 # episodes.

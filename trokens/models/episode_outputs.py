@@ -22,8 +22,9 @@ def _detach_diagnostics(result):
     """
     loss_inputs = {
         'query_partial_q2s_logits', 'query_partial_q2s_base_logits',
-        'query_quality_logits', 'query_relation_logits',
+        'query_relation_logits',
         'global_classification_logits',
+        'entity_state_logits', 'entity_geo_logits',
     }
     return {key: value.detach() if torch.is_tensor(value) and key not in loss_inputs else value
             for key, value in result.items()}

@@ -31,11 +31,10 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.CLASS_LOSS_LAMBDA = 1.0
     cfg.FEW_SHOT.Q2S_LOSS_LAMBDA = 1.0
     # None leaves archived/other-dataset configs untouched. Main profiles specify all
-    # four booleans; resolve_ablation_cfg derives legacy flags and loss weights.
+    # three booleans; resolve_ablation_cfg derives legacy flags and loss weights.
     cfg.FEW_SHOT.DECOUPLING = CfgNode()
     cfg.FEW_SHOT.DECOUPLING.QUERY_ENABLE = None
     cfg.FEW_SHOT.DECOUPLING.SUPPORT_ENABLE = None
-    cfg.FEW_SHOT.DECOUPLING.M_ENABLE = None
     cfg.FEW_SHOT.DECOUPLING.RHO_ENABLE = None
     # Internal matching defaults; no duplicate block in the main dataset YAMLs.
     cfg.FEW_SHOT.MATCHING = CfgNode()
@@ -44,9 +43,39 @@ def add_custom_config(cfg):
     # Used only when at least one judgment is enabled; otherwise exactly 1/0.
     cfg.FEW_SHOT.MATCHING.BASE_LOSS_WEIGHT = 0.6
     cfg.FEW_SHOT.MATCHING.FINAL_LOSS_WEIGHT = 0.4
-    cfg.FEW_SHOT.MATCHING.M_AUX_WEIGHT = 0.05
     cfg.FEW_SHOT.MATCHING.RHO_AUX_WEIGHT = 0.05
     cfg.FEW_SHOT.MATCHING.TRANSPORT_STRENGTH = 1.0
+    # Opt-in trajectory-cluster change evidence; no Support reliability gate.
+    cfg.FEW_SHOT.ENTITY_CHANGE = CfgNode()
+    change = cfg.FEW_SHOT.ENTITY_CHANGE
+    change.ENABLE = False
+    change.STATE_ENABLE = True
+    change.GEO_ENABLE = True
+    change.DETACH_INPUTS = True
+    change.GRANULARITY = 'cluster'  # cluster | frame | point
+    change.STRICT_COMMON_REPLAY = False
+    change.CORRESPONDENCE_SHUFFLE = False
+    change.SHUFFLE_SEED = 261106
+    change.MAX_ENTITIES = 16
+    change.MIN_POINTS = 4  # distinct original trajectories, not sampled slots
+    change.REF_TOPK = 4
+    change.NORM_EPS = 1e-6
+    change.GEO_NUM_BINS = 16
+    change.GEO_MIN_STEPS = 3
+    change.GEO_SPEED_SCALE = 0.01  # normalized coordinates / cached-frame step
+    change.GEO_AMPLITUDE_WEIGHT = 0.25
+    change.STATE_TEMPERATURE_INIT = 0.1
+    change.STATE_SCALE_INIT = 10.0
+    change.GEO_TEMPERATURE_INIT = 0.1
+    change.GEO_SCALE_INIT = 10.0
+    change.LAMBDA_STATE_INIT = 0.0
+    change.LAMBDA_GEO_INIT = 0.0
+    change.STATE_AUX_WEIGHT = 0.05
+    change.GEO_AUX_WEIGHT = 0.05
+    change.LR_MULT = 100.0
+    # Inference interventions keep checkpoint architecture unchanged.
+    change.STATE_TEST_MULT = 1.0
+    change.GEO_TEST_MULT = 1.0
     # Opt-in single-path Label -> Patch priors inside serial temporal/spatial attention.
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL = CfgNode()
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ENABLE = False
@@ -65,8 +94,6 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.CLASS_CHUNK_SIZE = 1
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.VIDEO_CHUNK_SIZE = 4
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.ACTIVATION_CHECKPOINT = True
-    # Raw quality is class-conditioned but independent of Post encodings.
-    cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.BATCH_RAW_QUALITY = False
     # Faster high-memory alternative to checkpointing the entire encoder/readout.
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.MLP_CHECKPOINT = False
     cfg.FEW_SHOT.LABEL_PRE_TEMPORAL.READOUT_CHECKPOINT = False
@@ -74,7 +101,7 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.TEXT_CONCAT_ST = CfgNode()
     cfg.FEW_SHOT.TEXT_CONCAT_ST.ENABLE = False
     # Support stays text-conditioned; Query is encoded once without text.
-    # This ablation requires both evidence judgments OFF.
+    # This ablation requires rho OFF.
     cfg.FEW_SHOT.TEXT_CONCAT_ST.SHARED_QUERY_ENABLE = False
     # Support uses ordinary visual-only encoding and mean patch readout,
     # independently of whether Query is class-conditioned.
@@ -108,29 +135,14 @@ def add_custom_config(cfg):
     cfg.FEW_SHOT.POT_ROUTE.QUERY_PARTIAL_LOGIT_BIAS = -2.0
 
 
-    # Raw semantic quality and Post metric uniqueness verify Query frames.
+    # Post positive/negative Support evidence verifies Query frames.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY = CfgNode()
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ENABLE = False
     verifier = CfgNode()
-    # Preserve v3 for old configs; SAV opts into the direct learned decision.
-    verifier.QUALITY_MODE = "semantic_relation"
-    verifier.QUALITY_HIDDEN_DIM = 64
-    verifier.QUALITY_DECISION_LOCAL_DIM = 32
-    verifier.QUALITY_DECISION_READOUT_DIM = 16
-    verifier.QUALITY_PATCH_TEMPERATURE = 0.07
-    verifier.QUALITY_REFERENCE_TEMPERATURE = 0.10
-    verifier.QUALITY_MAX_POOL_DELTA = 0.5
-    verifier.QUALITY_MAX_REFERENCE_DELTA = 0.5
-    verifier.QUALITY_MAX_EVIDENCE_DELTA = 0.10
-    verifier.QUALITY_SCALE_INIT = 10.0
-    verifier.QUALITY_BIAS_INIT = 0.0
-    # Inference mechanism control: 0 removes only the final relation correction.
-    verifier.QUALITY_RELATION_STRENGTH = 1.0
     verifier.METRIC_TEMPERATURE_INIT = 0.10
     verifier.METRIC_SCALE_INIT = 10.0
     verifier.DETACH_INPUTS = True
     verifier.WEIGHT_DECAY = 0.01
-    verifier.SEMANTIC_MIL_WEIGHT = 0.05
     verifier.RELATION_MIL_WEIGHT = 0.05
     verifier.TRANSPORT_WARMUP_FRACTION = 0.05
     verifier.QUERY_CHUNK_SIZE = 4
@@ -139,8 +151,7 @@ def add_custom_config(cfg):
     # normalization, softmax, pooling and gates remain FP32.
     verifier.AMP_ENABLE = False
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER = verifier
-    # Independent quality and uniqueness ablations.
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.QUALITY_ENABLE = True
+    # Independent rho ablation.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.UNIQUENESS_ENABLE = True
     # Shared hypothesis transport and base/verified training objectives.
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.ABSOLUTE_MASS_TRANSPORT_STRENGTH = 1.0

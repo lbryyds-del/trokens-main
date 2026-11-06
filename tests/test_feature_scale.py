@@ -34,47 +34,13 @@ def test_disabled_and_unit_gains_are_exact_identity():
     torch.testing.assert_close(x, before, rtol=0, atol=0)
 
 
-def test_tiny_and_sav_share_one_gain_and_keep_dataset_protocols():
-    profiles = []
-    for name in ("tinyvirat", "sav"):
-        path = ROOT / "configs/trokens" / f"{name}.yaml"
-        explicit = yaml.safe_load(path.read_text())
-        assert explicit["_BASE_"] == "_base_/dinotxt_scaled.yaml"
-        assert "FEATURE_SCALE" not in explicit["MODEL"]
-        cfg = get_cfg()
-        cfg.merge_from_file(str(path))
-        assert_and_infer_cfg(cfg)
-        profiles.append(cfg)
-        assert cfg.MODEL.FEAT_EXTRACTOR == "dinotxt_vitl14_reg4"
-        assert not cfg.MODEL.TRAIN_BACKBONE
-        assert cfg.MODEL.FEATURE_SCALE.ENABLE
-        assert cfg.MODEL.MOTION_MODULE.USE_HOD_MOTION_MODULE
-        assert cfg.MODEL.MOTION_MODULE.USE_CROSS_MOTION_MODULE
-        assert cfg.POINT_INFO.HOD.GET_FEAT
-        assert not any(cfg.FEW_SHOT.DECOUPLING.values())
-        assert cfg.FEW_SHOT.N_WAY == 5
-        assert cfg.FEW_SHOT.TRAIN_EPISODES == 2000
-        assert cfg.FEW_SHOT.TEST_EPISODES == 10000
-        assert cfg.SOLVER.MAX_EPOCH == 20
-        assert cfg.TRAIN.NEW_TRAIN and not cfg.TRAIN.AUTO_RESUME
-        assert cfg.TRAIN.CHECKPOINT_FILE_PATH == ""
-        assert cfg.OUTPUT_DIR == f"output/{name}/dinotxt_scaled"
-    tiny, sav = profiles
-    assert tiny.MODEL.FEATURE_SCALE == sav.MODEL.FEATURE_SCALE
-    assert tiny.MODEL.FEATURE_SCALE.APPEARANCE_GAIN == GAIN
-    assert tiny.MODEL.FEATURE_SCALE.HOD_GAIN == tiny.MODEL.FEATURE_SCALE.CTD_GAIN == 1.
-    assert tiny.FEW_SHOT.K_SHOT == 1 and sav.FEW_SHOT.K_SHOT == 3
-    assert tiny.TEST.DROP_EMPTY_QUERY_ROWS and not sav.TEST.DROP_EMPTY_QUERY_ROWS
-
-
-@pytest.mark.parametrize("name", [
-    "sav_text_concat_s1_base", "sav_text_concat_s1_m_rho_on",
-    "sav_text_concat_shared_query", "sav_shared_support_query", "sav_label_pre_temporal",
-])
-def test_archived_profiles_keep_unit_scale(name):
+@pytest.mark.parametrize("name", ["sav", "sav_rho_only", "sav_decoupled_base", "tinyvirat"])
+def test_active_profiles_keep_unscaled_frozen_dinotxt(name):
     cfg = get_cfg()
     cfg.merge_from_file(str(ROOT / "configs/trokens" / f"{name}.yaml"))
-    assert not assert_and_infer_cfg(cfg).MODEL.FEATURE_SCALE.ENABLE
+    assert_and_infer_cfg(cfg)
+    assert cfg.MODEL.FEAT_EXTRACTOR == "dinotxt_vitl14_reg4"
+    assert not cfg.MODEL.TRAIN_BACKBONE and not cfg.MODEL.FEATURE_SCALE.ENABLE
     assert tuple(feature_gain(cfg, b) for b in ("appearance", "hod", "ctd")) == (1., 1., 1.)
 
 
@@ -104,7 +70,7 @@ def test_adapter_requires_frozen_enabled_dinotxt(override):
 
 
 def test_real_forward_scales_before_positions_and_after_motion_modules():
-    model = _model((False, False, False, False)).eval()
+    model = _model((False, False, False)).eval()
     cfg = model.cfg
     cfg.MF.USE_BASE_POS_EMBED = True
     cfg.MODEL.FEATURE_SCALE.ENABLE = True
@@ -135,7 +101,7 @@ def test_real_forward_scales_before_positions_and_after_motion_modules():
 
 
 @pytest.mark.parametrize("flags", [
-    (False, False, False, False), (True, True, False, False), (True, True, True, True),
+    (False, False, False), (True, True, False), (True, True, True),
 ])
 def test_unit_gain_preserves_forward_and_checkpoint_keys(flags):
     model = _model(flags).eval()
@@ -154,8 +120,8 @@ def test_unit_gain_preserves_forward_and_checkpoint_keys(flags):
     assert tuple(model.state_dict()) == keys
 
 
-def test_raw_semantic_evidence_is_unscaled_for_both_roles(monkeypatch):
-    model = _model((True, True, True, True)).eval()
+def test_rho_path_no_longer_samples_raw_m_evidence(monkeypatch):
+    model = _model((True, True, True)).eval()
     cfg = model.cfg
     cfg.MF.USE_BASE_POS_EMBED = True
     cfg.MODEL.FEATURE_SCALE.ENABLE = True
@@ -171,7 +137,7 @@ def test_raw_semantic_evidence_is_unscaled_for_both_roles(monkeypatch):
 
     monkeypatch.setattr("trokens.models.pointformer.text_concat_episode", capture)
     model({"video": f, "metadata": meta})
-    torch.testing.assert_close(captured["raw"], f, rtol=0, atol=0)
+    assert captured["raw"] is None
     for role in (meta["support_mask"], ~meta["support_mask"]):
         torch.testing.assert_close(captured["fused"][role], GAIN*f[role] + position[role])
 
@@ -179,7 +145,7 @@ def test_raw_semantic_evidence_is_unscaled_for_both_roles(monkeypatch):
 def test_real_motion_encoders_fusion_and_training_gradients():
     from trokens.models.branches.motion_blocks import HODMotionModule, CrossMotionModule
 
-    model = _model((False, False, False, False)).train()
+    model = _model((False, False, False)).train()
     cfg = model.cfg
     cfg.MODEL.FEATURE_SCALE.ENABLE = True
     cfg.MODEL.FEATURE_SCALE.APPEARANCE_GAIN = GAIN
@@ -210,7 +176,7 @@ def test_real_motion_encoders_fusion_and_training_gradients():
 
 
 def test_checkpoint_guard_handles_legacy_and_explicit_initialization():
-    model = _model((False, False, False, False))
+    model = _model((False, False, False))
     old_cfg = model.cfg.dump()
     validate_feature_scale_checkpoint(model, old_cfg)
     validate_feature_scale_checkpoint(model, None)
@@ -232,7 +198,7 @@ def test_checkpoint_guard_handles_legacy_and_explicit_initialization():
 def test_production_checkpoint_loader_checks_before_loading(tmp_path, direction):
     from trokens.utils.checkpoint import load_checkpoint
 
-    source, target = (_model((False, False, False, False)) for _ in range(2))
+    source, target = (_model((False, False, False)) for _ in range(2))
     scaled = source if direction == "scaled_to_old" else target
     scaled.cfg.MODEL.FEATURE_SCALE.ENABLE = True
     scaled.cfg.MODEL.FEATURE_SCALE.APPEARANCE_GAIN = GAIN

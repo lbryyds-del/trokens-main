@@ -566,7 +566,12 @@ def test_few_shot(cfg, args, wandb_run=None):
     # Build the video model and print model statistics.
     model = build_model(cfg)
     cur_epoch = cu.load_test_checkpoint(cfg, model)
-    val_loader = loader.construct_loader(cfg, "test")
+    eval_cfg = cfg
+    if cfg.TEST.DATA_CSV:
+        eval_cfg = cfg.clone()
+        eval_cfg.DATA.DATA_CSV_NAME = os.path.abspath(cfg.TEST.DATA_CSV)
+        logger.info('Final evaluation CSV: %s', eval_cfg.DATA.DATA_CSV_NAME)
+    val_loader = loader.construct_loader(eval_cfg, "test")
     val_meter = ValMeter(
         len(val_loader),
         cfg,
@@ -577,7 +582,7 @@ def test_few_shot(cfg, args, wandb_run=None):
         extra_metrics_prefix=None,
     )
 
-    test_epoch(val_loader, model, val_meter, cur_epoch, cfg)
+    test_epoch(val_loader, model, val_meter, cur_epoch, eval_cfg)
     if test_log_handler is not None:
         pylogging.getLogger().removeHandler(test_log_handler)
         test_log_handler.close()

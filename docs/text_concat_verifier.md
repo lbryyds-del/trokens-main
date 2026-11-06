@@ -1,5 +1,7 @@
 # 双轴单文本拼接 v2：Raw m + 同空间权重 Post ρ
 
+> 历史记录，非当前运行说明。2026-11-06 已删除废弃实验代码和旧配置；当前入口及恢复方法见 [ρ 收敛记录](rho_cleanup_20261106.md)。本文原始实验叙述保留，不代表当前模型。
+
 保留入口 `configs/trokens/sav_text_concat_s1_m_rho_on.yaml`；输出 `output/savo`（以启动时加载的配置为准）。
 默认 `sav.yaml` 已切换到[Support / Query 均通用编码、m/ρ 全关闭实验](shared_support_query.md)；本文描述原双侧拼接开启版。
 这是新的判断/损失实验，不是与关闭版数值等价的提速。未自动启动正式训练。

@@ -14,10 +14,17 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
-from trokens.models.query_evidence_verifier import (
-    _masked_softmax, finish_query_evidence_aux,
-)
+from trokens.models.query_evidence_verifier import finish_query_evidence_aux
 from trokens.models.query_matching import normalize_patch_region_weights
+
+
+def _masked_softmax(logits, valid):
+    """Finite masked softmax for the legacy routing reader."""
+    valid = valid.bool().expand_as(logits)
+    has_any = valid.any(dim=-1, keepdim=True)
+    scores = logits.float().masked_fill(~valid, -torch.inf)
+    scores = torch.where(has_any, scores, torch.zeros_like(scores))
+    return scores.softmax(dim=-1) * valid.float()
 
 
 class LabelPreTemporalRouting(nn.Module):
@@ -33,7 +40,6 @@ class LabelPreTemporalRouting(nn.Module):
         self.video_chunk_size = int(cfg.VIDEO_CHUNK_SIZE)
         self.class_chunk_size = int(cfg.CLASS_CHUNK_SIZE)
         self.activation_checkpoint = bool(cfg.ACTIVATION_CHECKPOINT)
-        self.batch_raw_quality = bool(cfg.BATCH_RAW_QUALITY)
         self.readout_checkpoint = bool(cfg.READOUT_CHECKPOINT)
         self.global_classifier = bool(global_classifier)
         if not math.isfinite(self.temperature) or self.temperature <= 0:
@@ -293,11 +299,11 @@ def _query_chunk(model, tokens, token_mask, state, gate, early_weights, route_ma
         rho_weights = weights
         if verifier is not None and verifier.uniqueness:
             # Rho deliberately retains its Post-conditioned evidence weights;
-            # only main matching reuses early weights. M stays Raw-only.
+            # only main matching reuses early weights.
             rho_weights = _readout(model, value, route_mask, rho_condition[k:k+1])[1]
         hypothesis_weights = normalize_patch_region_weights(rho_weights, query_valid)
         outputs = {}
-        # Singleton class calls preserve the existing metric/quality kernels.
+        # Singleton class calls preserve the existing metric kernels.
         # Query and ALL positive/negative Supports refer to the same candidate
         # class, with shared encoder parameters but asymmetric gates (Support:
         # text; Query: Raw-fused condition). Both rho reads use Post positive-
@@ -305,13 +311,11 @@ def _query_chunk(model, tokens, token_mask, state, gate, early_weights, route_ma
         # Never flatten class-specific tokens into shared references.
         if verifier is not None:
             outputs = verifier(
-                raw_query=raw_query, raw_support=raw_support, text=text[k:k+1],
+                text=text[k:k+1],
                 post_query=value, post_references=references[:, k:k+1] if references is not None else None,
                 query_weights=hypothesis_weights, query_valid=query_valid,
-                support_raw_valid=support_valid,
                 support_frame_valid=reference_valid[:, k:k+1] if reference_valid is not None else None,
-                support_labels=support_labels[:, k:k+1], support_known=support_known[:, k:k+1],
-                quality_output={} if model.label_pre_temporal.batch_raw_quality else None)
+                support_labels=support_labels[:, k:k+1], support_known=support_known[:, k:k+1])
         parts.append((frames, weights, hypothesis_weights, outputs))
     frames, weights, hypotheses, outputs = zip(*parts)
     return (torch.cat(frames, 1), torch.cat(weights, 1), torch.cat(hypotheses, 1),
@@ -365,18 +369,11 @@ def label_conditioned_episode(model, features, raw, metadata):
     support_chunks, query_chunks = chunks(si), chunks(qi)
     raw_support = raw.index_select(0, si)
     support_valid = evidence_mask.index_select(0, si)
-    raw_query = raw.index_select(0, qi) if router.batch_raw_quality else None
     query_valid = evidence_mask.index_select(0, qi)
     all_query, all_support, all_weights, all_hypotheses, all_outputs = [], [], [], [], []
     global_sum = features.new_zeros(features.shape[0], features.shape[-1], dtype=torch.float32)
     for start in range(0, ids.numel(), router.class_chunk_size):
         classes = slice(start, start + router.class_chunk_size)
-        quality = {}
-        if router.batch_raw_quality and model.query_evidence_verifier is not None:
-            quality = _call(
-                router, model.query_evidence_verifier.compute_raw_quality,
-                raw_query, raw_support, text[classes], query_valid, support_valid,
-                labels[:, classes], known[:, classes])
         support_prototype, references, rho_condition, support_global = _call(
             router, partial(_support_class_chunk, model), support_chunks,
             gates[:, classes], early_weights[:, classes], text[classes], positive[:, classes])
@@ -399,7 +396,6 @@ def label_conditioned_episode(model, features, raw, metadata):
         all_weights.append(torch.cat(weights, 0))
         all_hypotheses.append(torch.cat(hypotheses, 0))
         group_outputs = _merge_outputs(outputs)
-        group_outputs.update(quality)
         all_outputs.append(group_outputs)
 
     query_prototypes = torch.cat(all_query, 1)

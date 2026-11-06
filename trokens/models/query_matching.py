@@ -201,36 +201,15 @@ def build_class_support_references(
     )
 
 
-def factorize_frame_hypothesis_states(
-    absolute_mass: torch.Tensor,
-    relative_matchability: torch.Tensor,
-) -> Dict[str, torch.Tensor]:
-    """Factor one candidate frame into target, confuser, and null states.
-
-    ``absolute_mass`` is the non-null probability ``m`` and
-    ``relative_matchability`` is the conditional target probability ``rho``.
-    The returned states are ``p+=m*rho``, ``p-=m*(1-rho)`` and ``p0=1-m``.
-    They are non-negative and sum to one for every Query/class/frame row.
-    """
-    if tuple(absolute_mass.shape) != tuple(relative_matchability.shape):
-        raise ValueError(
-            "absolute_mass and relative_matchability must have the same "
-            f"shape; got {tuple(absolute_mass.shape)} and "
-            f"{tuple(relative_matchability.shape)}."
-        )
-    mass = torch.nan_to_num(
-        absolute_mass.float(), nan=1.0, posinf=1.0, neginf=0.0
-    ).clamp(0.0, 1.0)
-    specificity = torch.nan_to_num(
+def rho_frame_hypothesis_states(relative_matchability: torch.Tensor) -> Dict[str, torch.Tensor]:
+    """Rho-only transport; retain zero null-mass diagnostics for old reports."""
+    rho = torch.nan_to_num(
         relative_matchability.float(), nan=1.0, posinf=1.0, neginf=0.0
     ).clamp(0.0, 1.0)
-    target_mass = mass * specificity
-    confuser_mass = mass * (1.0 - specificity)
-    null_mass = 1.0 - mass
     return {
-        "target_mass": target_mass,
-        "confuser_mass": confuser_mass,
-        "null_mass": null_mass,
+        "target_mass": rho,
+        "confuser_mass": 1.0 - rho,
+        "null_mass": torch.zeros_like(rho),
     }
 
 

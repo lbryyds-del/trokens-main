@@ -22,7 +22,7 @@ from tools.few_shot_multilabel import (compute_query_partial_q2s_loss,
 
 CONFIG = Path(__file__).resolve().parents[1] / 'configs/trokens/sav.yaml'
 sys.path.insert(0, str(CONFIG.parents[2] / 'tools'))
-COMBINATIONS = list(itertools.product((False, True), repeat=4))  # Query, Support, m, rho
+COMBINATIONS = list(itertools.product((False, True), repeat=3))  # Query, Support, rho
 VALID = [x for x in COMBINATIONS if x[0] or not any(x[2:])]
 TEXT_VALID = [x for x in VALID if any(x[:2])]
 
@@ -30,8 +30,9 @@ TEXT_VALID = [x for x in VALID if any(x[:2])]
 def _cfg(flags):
     cfg = get_cfg()
     cfg.merge_from_file(str(CONFIG))
-    for name, value in zip(('QUERY_ENABLE', 'SUPPORT_ENABLE', 'M_ENABLE', 'RHO_ENABLE'), flags):
+    for name, value in zip(('QUERY_ENABLE', 'SUPPORT_ENABLE', 'RHO_ENABLE'), flags):
         cfg.FEW_SHOT.DECOUPLING[name] = value
+    cfg.FEW_SHOT.ENTITY_CHANGE.ENABLE = False
     return resolve_ablation_cfg(cfg)
 
 
@@ -62,7 +63,6 @@ def _model(flags, mode='selective', archived_shared=False):
     cfg.FEW_SHOT.TEXT_CONCAT_ST.ACTIVATION_CHECKPOINT = mode == 'full'
     cfg.FEW_SHOT.TEXT_CONCAT_ST.MLP_CHECKPOINT = mode == 'selective'
     cfg.FEW_SHOT.TEXT_CONCAT_ST.READOUT_CHECKPOINT = mode == 'selective'
-    cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER.QUALITY_HIDDEN_DIM = 8
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.LEARNED_VERIFIER.QUERY_CHUNK_SIZE = 1
     model.embed_dim, model.depth, model.point_grid_size, model.temporal_resolution = 4, 1, 1, 3
     model.pot_route_cfg = cfg.FEW_SHOT.POT_ROUTE
@@ -125,9 +125,9 @@ def _loss(model, out, meta):
 
 @pytest.mark.parametrize('flags', COMBINATIONS)
 def test_config_dependencies_weights_and_idempotence(flags):
-    query, support, m, rho = flags
-    if not query and (m or rho):
-        with pytest.raises(ValueError, match='require QUERY_ENABLE=True'):
+    query, support, rho = flags
+    if not query and rho:
+        with pytest.raises(ValueError, match='requires QUERY_ENABLE=True'):
             _cfg(flags)
         return
     cfg = _cfg(flags)
@@ -141,19 +141,18 @@ def test_config_dependencies_weights_and_idempotence(flags):
     assert match.ENABLE == (query or support)
     assert cfg.FEW_SHOT.TEXT_CONCAT_ST.SHARED_QUERY_ENABLE == (not query)
     assert cfg.FEW_SHOT.TEXT_CONCAT_ST.SHARED_SUPPORT_ENABLE == (not support)
-    assert (match.QUALITY_ENABLE, match.UNIQUENESS_ENABLE) == (m, rho)
-    assert (match.BASE_LOGIT_LOSS_WEIGHT, match.VERIFIED_LOGIT_LOSS_WEIGHT) == ((.6, .4) if m or rho else (1., 0.))
-    assert match.BASE_ONLY_LOSS_ENABLE == ((query or support) and not (m or rho))
-    assert match.DUAL_LOGIT_LOSS_ENABLE == (m or rho)
-    assert match.LEARNED_VERIFIER.SEMANTIC_MIL_WEIGHT == (.05 if m else 0.)
+    assert match.UNIQUENESS_ENABLE == rho
+    assert (match.BASE_LOGIT_LOSS_WEIGHT, match.VERIFIED_LOGIT_LOSS_WEIGHT) == ((.6, .4) if rho else (1., 0.))
+    assert match.BASE_ONLY_LOSS_ENABLE == ((query or support) and not rho)
+    assert match.DUAL_LOGIT_LOSS_ENABLE == rho
     assert match.LEARNED_VERIFIER.RELATION_MIL_WEIGHT == (.05 if rho else 0.)
-    assert match.ABSOLUTE_MASS_TRANSPORT_STRENGTH == (1. if m or rho else 0.)
+    assert match.ABSOLUTE_MASS_TRANSPORT_STRENGTH == (1. if rho else 0.)
 
 
 @pytest.mark.parametrize('flags', TEXT_VALID)
 @pytest.mark.parametrize('mode', ['none', 'full', 'selective'])
 def test_roles_matching_and_exact_loss_gradients(flags, mode, monkeypatch):
-    query, support, m, rho = flags
+    query, support, rho = flags
     model = _model(flags, mode).train()
     f, raw, meta = _episode()
     f.requires_grad_()
@@ -180,22 +179,21 @@ def test_roles_matching_and_exact_loss_gradients(flags, mode, monkeypatch):
         .5 * ((a @ b.T).max(1).values.mean() + (a @ b.T).max(0).values.mean())
         for a, b in zip(q[row] if query else q[row:row+1].expand(2, -1, -1), s)]) for row in range(2)])
     torch.testing.assert_close(out['query_partial_q2s_base_logits'], 10 * scores - 2)
-    assert ('query_quality_logits' in out) == m
+    assert 'query_quality_logits' not in out
     assert ('query_relation_logits' in out) == rho
-    assert (model.query_evidence_verifier is not None) == (m or rho)
+    assert (model.query_evidence_verifier is not None) == rho
     total, actual, metrics = _loss(model, out, meta)
     labels = meta['episode_positive_labels'][2:].float()
     base = F.binary_cross_entropy_with_logits(out['query_partial_q2s_base_logits'], labels)
     expected = base
-    if m or rho:
+    if rho:
         final = F.binary_cross_entropy_with_logits(out['query_partial_q2s_logits'], labels)
         expected = .6 * base + .4 * final
-        mass, relation = out.get('query_frame_absolute_patch_mass', 1.), out.get('query_frame_matchability', 1.)
-        torch.testing.assert_close(out['query_frame_target_mass'], mass * relation)
+        torch.testing.assert_close(out['query_frame_target_mass'], out['query_frame_matchability'])
     else:
         assert out['query_partial_q2s_logits'] is out['query_partial_q2s_base_logits']
         assert metrics['q2s_verified_loss'] == 0
-    for name, enabled in [('quality', m), ('relation', rho)]:
+    for name, enabled in [('relation', rho)]:
         assert (f'q2s_{name}_mil_loss' in metrics) == enabled
         if enabled:
             expected = expected + .05 * compute_learned_evidence_mil_loss(
@@ -246,7 +244,7 @@ def test_empty_masks_unknown_labels_and_checkpoint_isolation(flags):
 
 @pytest.mark.parametrize('query,support', itertools.product((False, True), repeat=2))
 def test_five_way_matching_shape(query, support):
-    model = _model((query, support, query, query)).train()
+    model = _model((query, support, query)).train()
     model.head = nn.Linear(4, 5)
     model._get_pot_label_text_features = lambda ids, dtype: F.one_hot(ids % 4, 4).to(dtype)
     f, raw = torch.randn(7, 3, 5, 4, requires_grad=True), torch.randn(7, 3, 5, 4)
@@ -276,34 +274,35 @@ def test_invalid_switches_fail_before_model_loading_or_output_creation(tmp_path,
     cfg = get_cfg()
     cfg.merge_from_file(str(CONFIG))
     cfg.FEW_SHOT.DECOUPLING.QUERY_ENABLE = False
-    cfg.FEW_SHOT.DECOUPLING.M_ENABLE = True
-    with pytest.raises(ValueError, match='require QUERY_ENABLE=True'):
+    cfg.FEW_SHOT.ENTITY_CHANGE.ENABLE = False
+    cfg.FEW_SHOT.DECOUPLING.RHO_ENABLE = True
+    with pytest.raises(ValueError, match='requires QUERY_ENABLE=True'):
         Pointformer(cfg)  # validation precedes frozen-backbone initialization
     def forbidden(*args):
         raise AssertionError('Invalid configuration must not create checkpoints')
     monkeypatch.setattr(parser.cu, 'make_checkpoint_dir', forbidden)
     args = SimpleNamespace(cfg_file=str(CONFIG), output_dir=str(tmp_path / 'absent'),
                            opts=['FEW_SHOT.DECOUPLING.QUERY_ENABLE', 'False',
-                                 'FEW_SHOT.DECOUPLING.M_ENABLE', 'True'])
-    with pytest.raises(ValueError, match='require QUERY_ENABLE=True'):
+                                 'FEW_SHOT.DECOUPLING.RHO_ENABLE', 'True',
+                                 'FEW_SHOT.ENTITY_CHANGE.ENABLE', 'False'])
+    with pytest.raises(ValueError, match='requires QUERY_ENABLE=True'):
         parser.load_config(args)
     assert not (tmp_path / 'absent').exists()
 
 
 def test_toggling_back_off_clears_every_derived_loss_and_transport():
-    cfg = _cfg((True, True, True, True))
-    cfg.FEW_SHOT.DECOUPLING.M_ENABLE = False
+    cfg = _cfg((True, True, True))
     cfg.FEW_SHOT.DECOUPLING.RHO_ENABLE = False
     resolve_ablation_cfg(cfg)
     match = cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY
     assert match.BASE_ONLY_LOSS_ENABLE and not match.DUAL_LOGIT_LOSS_ENABLE
     assert (match.BASE_LOGIT_LOSS_WEIGHT, match.VERIFIED_LOGIT_LOSS_WEIGHT) == (1., 0.)
     assert match.ABSOLUTE_MASS_TRANSPORT_STRENGTH == 0.
-    assert match.LEARNED_VERIFIER.SEMANTIC_MIL_WEIGHT == match.LEARNED_VERIFIER.RELATION_MIL_WEIGHT == 0.
+    assert match.LEARNED_VERIFIER.RELATION_MIL_WEIGHT == 0.
 
 
 def test_both_roles_off_automatically_restore_default_branch_and_toggle_back():
-    cfg = _cfg((True, True, True, True))
+    cfg = _cfg((True, True, True))
     for name in cfg.FEW_SHOT.DECOUPLING:
         cfg.FEW_SHOT.DECOUPLING[name] = False
     resolve_ablation_cfg(cfg)
@@ -334,7 +333,7 @@ def test_default_branch_reuses_old_train_test_formula_and_gradients(mode, monkey
     from train_few_shot import process_patch_tokens as train_score
     from test_few_shot import process_patch_tokens as test_score
     from tools.few_shot_multilabel import support_query_split_multilabel, unpack_episode_output
-    flags = (False, False, False, False)
+    flags = (False, False, False)
     model = _model(flags, mode).train()
     f, raw, meta = _episode()
     f.requires_grad_()
@@ -391,7 +390,7 @@ def test_default_branch_reuses_old_train_test_formula_and_gradients(mode, monkey
 
 
 def test_default_branch_rejects_old_calibrated_shared_checkpoint():
-    flags = (False, False, False, False)
+    flags = (False, False, False)
     calibrated, baseline = _model(flags, archived_shared=True), _model(flags)
     assert calibrated.text_concat_st.architecture_signature.tolist() == [5, 0, 0, 1]
     assert baseline.text_concat_st is None
@@ -402,9 +401,14 @@ def test_default_branch_rejects_old_calibrated_shared_checkpoint():
 
 
 @pytest.mark.parametrize('dataset', ['sav', 'tinyvirat'])
-def test_main_constructor_enables_motion_skips_text_and_matches_original(dataset, monkeypatch):
+def test_explicit_original_constructor_enables_motion_and_skips_text(dataset, monkeypatch):
     cfg = get_cfg()
     cfg.merge_from_file(str(CONFIG.with_name(dataset + '.yaml')))
+    cfg.FEW_SHOT.ENTITY_CHANGE.ENABLE = False
+    for name in cfg.FEW_SHOT.DECOUPLING:
+        cfg.FEW_SHOT.DECOUPLING[name] = False
+    cfg.MODEL.MOTION_MODULE.USE_HOD_MOTION_MODULE = True
+    cfg.MODEL.MOTION_MODULE.USE_CROSS_MOTION_MODULE = True
     resolve_ablation_cfg(cfg)
     original = cfg.clone()
     for name in original.FEW_SHOT.DECOUPLING:
@@ -441,9 +445,10 @@ def test_main_constructor_enables_motion_skips_text_and_matches_original(dataset
 
 
 @pytest.mark.parametrize('dataset', ['sav', 'tinyvirat'])
-def test_text_ablation_constructor_keeps_both_judgments_but_never_builds_motion(dataset, monkeypatch):
+def test_text_ablation_constructor_keeps_rho_but_never_builds_motion(dataset, monkeypatch):
     cfg = get_cfg()
     cfg.merge_from_file(str(CONFIG.with_name(dataset + '.yaml')))
+    cfg.FEW_SHOT.ENTITY_CHANGE.ENABLE = False
     # Explicit no-motion ablation remains supported independently of the defaults.
     for name in cfg.FEW_SHOT.DECOUPLING:
         cfg.FEW_SHOT.DECOUPLING[name] = True
@@ -462,24 +467,24 @@ def test_text_ablation_constructor_keeps_both_judgments_but_never_builds_motion(
     monkeypatch.setattr('trokens.models.pointformer.CrossMotionModule', forbidden)
     model = Pointformer(cfg)
     assert model.use_text_concat_st and model.use_label_text_features
-    assert model.query_evidence_verifier.quality
+    assert not hasattr(model.query_evidence_verifier, "semantic_quality")
     assert model.query_evidence_verifier.uniqueness
     assert not hasattr(model, 'hod_motion_module')
     assert not hasattr(model, 'cross_motion_module')
 
 
-def test_text_ablation_forward_without_motion_keeps_m_rho_and_finite_gradients():
-    model = _model((True, True, True, True)).train()
+def test_text_ablation_forward_without_motion_keeps_rho_and_finite_gradients():
+    model = _model((True, True, True)).train()
     features, _, metadata = _episode()
     features.requires_grad_()
     # No motion modules or HoD inputs exist in this fixture: forward must skip them.
     assert 'hod_feat' not in metadata
     output = model({'video': features, 'metadata': metadata})
-    assert 'query_quality_logits' in output and 'query_relation_logits' in output
+    assert 'query_quality_logits' not in output and 'query_relation_logits' in output
     assert output['query_partial_q2s_logits'].shape == (2, 2)
     assert torch.isfinite(output['query_partial_q2s_logits']).all()
     loss, _, metrics = _loss(model, output, metadata)
-    assert 'q2s_quality_mil_loss' in metrics and 'q2s_relation_mil_loss' in metrics
+    assert 'q2s_quality_mil_loss' not in metrics and 'q2s_relation_mil_loss' in metrics
     loss.backward()
     assert torch.isfinite(features.grad).all() and features.grad.abs().sum() > 0
 
@@ -514,6 +519,6 @@ def _ddp_worker(rank, path, flags):
         torch.distributed.destroy_process_group()
 
 
-@pytest.mark.parametrize('flags', [(False, False, False, False), (True, False, True, True)])
+@pytest.mark.parametrize('flags', [(False, False, False), (True, False, True)])
 def test_cpu_ddp_two_updates(tmp_path, flags):
     torch.multiprocessing.spawn(_ddp_worker, args=(str(tmp_path / 'ddp'), flags), nprocs=2, join=True)

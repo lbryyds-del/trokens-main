@@ -278,7 +278,7 @@ def save_checkpoint(path_to_job, model, optimizer, epoch, cfg, scaler=None, best
     if not best:
         path_to_checkpoint = get_path_to_checkpoint(path_to_job, epoch + 1)
         previous_checkpoint = get_path_to_checkpoint(path_to_job, epoch)
-        if os.path.exists(previous_checkpoint):
+        if os.path.exists(previous_checkpoint) and not _train_cfg_value(cfg, 'CHECKPOINT_KEEP_ALL', False):
             os.remove(previous_checkpoint)
     else:
         path_to_checkpoint = get_path_to_checkpoint(path_to_job, epoch + 1, best=True)
@@ -438,8 +438,8 @@ def validate_verifier_checkpoint(model, state_dict, allow_init=False):
         version = state_dict[version_key]
         if version.numel() != 1 or version.item() != verifier.architecture_version.item():
             raise ValueError(
-                "Checkpoint evidence architecture version does not match the configured quality/uniqueness heads. "
-                "semantic_relation + metric is v3; relation_decision + metric is v5. "
+                "Checkpoint evidence architecture does not match the retained rho-only verifier (v2). "
+                "Retired m heads are unsupported; use their archived source to replay them. "
                 "Changing heads requires a new training run; incompatible weights cannot be resumed or evaluated."
             )
     expected = {prefix + name: value for name, value in verifier.state_dict().items()}

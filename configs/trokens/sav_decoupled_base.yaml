@@ -1,0 +1,8 @@
+# Matched dual-conditioned baseline, without rho or change evidence.
+_BASE_: sav_rho_only.yaml
+OUTPUT_DIR: output/sav/decoupled_base
+FEW_SHOT:
+  DECOUPLING:
+    RHO_ENABLE: False
+WANDB:
+  EXP_NAME: sav_decoupled_base

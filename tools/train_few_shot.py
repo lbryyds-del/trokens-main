@@ -956,8 +956,13 @@ def train_few_shot(cfg, args, wandb_run=None):
     )
     # Create the video train and val loaders.
     train_loader = loader.construct_loader(cfg, "train")
-    # Keep the original training-time evaluation behavior on the test split.
-    val_loader = loader.construct_loader(cfg, "test", less_iters=True)
+    # Default stays historical; an explicit development CSV affects only this loader.
+    eval_cfg = cfg
+    if cfg.TRAIN.EVAL_DATA_CSV:
+        eval_cfg = cfg.clone()
+        eval_cfg.DATA.DATA_CSV_NAME = os.path.abspath(cfg.TRAIN.EVAL_DATA_CSV)
+        logger.info('Training-time development CSV: %s', eval_cfg.DATA.DATA_CSV_NAME)
+    val_loader = loader.construct_loader(eval_cfg, "test", less_iters=True)
     if cfg.LOG_MODEL_INFO and du.is_master_proc():
         model_info = misc.log_model_info(model, cfg, train_loader)
         # log in wandb as a summary

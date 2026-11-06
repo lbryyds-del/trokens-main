@@ -21,9 +21,17 @@ This repository contains the official code for the paper "Trokens: Semantic-Awar
 
 ## SAV 默认入口
 
-SAV 默认入口 `configs/trokens/sav.yaml` 使用[统一消融开关与损失联动](docs/sav_ablation.md)：`FEW_SHOT.DECOUPLING` 下的 `QUERY_ENABLE`、`SUPPORT_ENABLE`、`M_ENABLE`、`RHO_ENABLE`。当前全部关闭；Query 开启才允许 K:K 同类匹配及 m/ρ，判断头、匹配修正、base/final 与辅助损失自动对应，无需再修改多组旧开关。
+SAV 默认入口 `configs/trokens/sav.yaml` 已收敛为：Query/Support 类别条件化解耦、原 ρ 相对核验、轨迹簇状态变化与几何运动证据。最终分数为 `z_rho + lambda_state * L_state + lambda_geo * L_geo`。m、配对竞争、Query-only 反馈及其旧实验入口已删除，未增加绑定或单向否决。
 
-原[仅 Support 拼接版](docs/text_concat_shared_query.md) 保留在 `sav_text_concat_shared_query.yaml`；原[双侧拼接＋m/ρ 开启版](docs/text_concat_verifier.md) 固定在 `sav_text_concat_s1_m_rho_on.yaml`，原[双侧拼接、m/ρ 关闭版](docs/text_concat_st.md) 固定在 `sav_text_concat_s1_base.yaml`；fast、S32 和旧前置路由配置的有效值保持不变。通用配置见[默认模型说明](docs/model.md)，删除内容及验证见[仓库清理记录](docs/repository_cleanup.md)。
+训练协议保持 5-way 1-shot、LR `3e-5`、10 轮、3 轮 warmup、2 卡 × 累积 2。新增标量 LR 倍率 100（即峰值 `3e-3`），不加 weight decay；HoD/CTD 保持关闭。训练期验证使用原开发池；正式测试使用完整原始测试池，10,000 episodes，不再默认 reserved 子集。
+
+```bash
+python tools/run_local.py --cfg configs/trokens/sav.yaml --gpus 0,1
+```
+
+默认输出为独立的 `output/sav/rho_change`，不自动恢复旧训练。仅检查命令时添加 `--dry-run`。ρ-only 与无证据基线分别保留为 `sav_rho_only.yaml`、`sav_decoupled_base.yaml`。原 pilot 配置 `sav_entity_change_s1.yaml` 仅用于历史开发/reserved 协议复现，不是正式默认入口。
+
+模型说明见 [model.md](docs/model.md)，清理范围、恢复位置和验证见 [本次清理记录](docs/rho_cleanup_20261106.md)。历史文档只记录当时实验，不再代表当前默认配置。
 
 ## Installation
 

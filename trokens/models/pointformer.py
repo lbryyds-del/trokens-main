@@ -320,10 +320,11 @@ class Pointformer(nn.Module):
 
     def _init_text_concat_st(self):
         self.text_concat_st = None
+        self.entity_change_verifier = None
         if not self.use_text_concat_st:
             return
         judgments = resolve_query_judgments(self.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY)
-        if ((judgments.quality or judgments.uniqueness)
+        if (judgments.uniqueness
                 and self.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.BASE_ONLY_LOSS_ENABLE):
             raise ValueError("Text-concat judgments require BASE_ONLY_LOSS_ENABLE=False.")
         if (self.use_label_pre_temporal or self.pot_route_cfg.ENABLE
@@ -341,7 +342,13 @@ class Pointformer(nn.Module):
             raise ValueError('CLASS_LOSS_LAMBDA must be finite and non-negative.')
         self.text_concat_st = TextConcatST(
             self.cfg.FEW_SHOT.TEXT_CONCAT_ST, global_classifier=class_weight > 0,
-            quality=judgments.quality, uniqueness=judgments.uniqueness)
+            uniqueness=judgments.uniqueness,
+            entity_change=self.cfg.FEW_SHOT.ENTITY_CHANGE)
+        if self.cfg.FEW_SHOT.ENTITY_CHANGE.ENABLE:
+            from trokens.config.entity_change import validate_entity_change_cfg
+            from .entity_change_verifier import EntityChangeVerifier
+            validate_entity_change_cfg(self.cfg)
+            self.entity_change_verifier = EntityChangeVerifier(self.cfg.FEW_SHOT.ENTITY_CHANGE)
         self.blocks[0].checkpoint_mlp = self.text_concat_st.mlp_checkpoint
         self.head.requires_grad_(class_weight > 0)
         self.pre_logits.requires_grad_(class_weight > 0)
@@ -381,7 +388,7 @@ class Pointformer(nn.Module):
         match_cfg = getattr(self.cfg.FEW_SHOT, "QUERY_CLASS_MATCHABILITY", None)
         self.query_evidence_verifier = None
         judgments = resolve_query_judgments(match_cfg)
-        if not (judgments.quality or judgments.uniqueness):
+        if not judgments.uniqueness:
             return
         if (not (self.use_frame_softmax_route or getattr(self, 'use_text_concat_st', False))
                 or not self.use_query_partial_q2s):
@@ -390,7 +397,7 @@ class Pointformer(nn.Module):
         with torch.random.fork_rng(devices=[]):
             self.query_evidence_verifier = QueryEvidenceVerifier(
                 self.embed_dim, match_cfg.LEARNED_VERIFIER,
-                quality=judgments.quality, uniqueness=judgments.uniqueness,
+                uniqueness=judgments.uniqueness,
             )
 
 
@@ -1848,14 +1855,7 @@ class Pointformer(nn.Module):
                 else:
                     raise NotImplementedError('Feature extractor not implemented')
 
-            few_shot_cfg = getattr(self.cfg, "FEW_SHOT", None)
-            match_cfg = getattr(
-                few_shot_cfg,
-                "QUERY_CLASS_MATCHABILITY",
-                None,
-            )
-            judgments = resolve_query_judgments(match_cfg)
-            raw_evidence_requested = judgments.quality or getattr(self, "use_label_pre_temporal", False)
+            raw_evidence_requested = getattr(self, "use_label_pre_temporal", False)
             if (
                 raw_evidence_requested
             ):

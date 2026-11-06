@@ -353,6 +353,11 @@ class BaseDataset(torch.utils.data.Dataset):
         metadata['pred_query_mask'] = pt_query_mask
         metadata['obj_ids'] = obj_ids
         metadata['point_indices'] = point_indices
+        if self.cfg.FEW_SHOT.ENTITY_CHANGE.ENABLE:
+            from .entity_tracks import build_entity_metadata
+            metadata.update(build_entity_metadata(
+                pt_to_take, pred_visibility & pt_query_mask, obj_ids,
+                point_indices, index_select, self.cfg.FEW_SHOT.ENTITY_CHANGE))
 
         metadata['video_name'] = self._video_names[index]
         metadata['batch_label'] = batch_label

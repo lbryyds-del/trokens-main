@@ -136,11 +136,12 @@ def test_base_only_loss_skips_verified_and_mil_and_preserves_unknown_mask(all_un
     from trokens.config.defaults import get_cfg
     import tools.few_shot_multilabel as helper
     cfg = get_cfg()
-    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav_text_concat_s1_base.yaml'))
+    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav_decoupled_base.yaml'))
+    from trokens.config.ablation import resolve_ablation_cfg
+    resolve_ablation_cfg(cfg)
     cfg.SOLVER.TEMPRATURE = .73
     base = torch.randn(2, 3, requires_grad=True)
     verified = torch.randn(2, 3, requires_grad=True)
-    quality = torch.randn(2, 3, 2, requires_grad=True)
     relation = torch.randn(2, 3, 2, requires_grad=True)
     labels = torch.tensor([[1., 0., -1.], [float('nan'), 1., 0.]])
     if all_unknown:
@@ -154,7 +155,7 @@ def test_base_only_loss_skips_verified_and_mil_and_preserves_unknown_mask(all_un
         calls.append(1)
         return original_bce(*args, **kwargs)
     monkeypatch.setattr(helper.F, 'binary_cross_entropy_with_logits', counted)
-    aux = dict(query_partial_q2s_base_logits=base, query_quality_logits=quality,
+    aux = dict(query_partial_q2s_base_logits=base,
                query_relation_logits=relation)
     loss, scaled, diagnostics = compute_query_partial_q2s_loss(verified, labels, aux, cfg)
     known = torch.isfinite(labels) & (labels >= 0) & (labels <= 1)
@@ -166,14 +167,16 @@ def test_base_only_loss_skips_verified_and_mil_and_preserves_unknown_mask(all_un
     assert diagnostics['q2s_verified_loss'].item() == 0.
     assert not any('mil' in key for key in diagnostics)
     loss.backward()
-    assert verified.grad is quality.grad is relation.grad is None
+    assert verified.grad is relation.grad is None
     assert torch.isfinite(base.grad).all() and base.grad[~known].eq(0).all()
 
 
 def test_base_only_rejects_missing_base_and_contradictory_dual_mode():
     from trokens.config.defaults import get_cfg
     cfg = get_cfg()
-    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav_text_concat_s1_base.yaml'))
+    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav_decoupled_base.yaml'))
+    from trokens.config.ablation import resolve_ablation_cfg
+    resolve_ablation_cfg(cfg)
     with pytest.raises(ValueError, match='requires base logits'):
         compute_query_partial_q2s_loss(torch.zeros(1, 2), torch.zeros(1, 2), {}, cfg)
     cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY.DUAL_LOGIT_LOSS_ENABLE = True
@@ -184,7 +187,9 @@ def test_base_only_rejects_missing_base_and_contradictory_dual_mode():
 def test_base_only_equals_previous_mixed_loss_when_base_is_final():
     from trokens.config.defaults import get_cfg
     cfg = get_cfg()
-    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav_text_concat_s1_base.yaml'))
+    cfg.merge_from_file(str(Path(__file__).resolve().parents[1] / 'configs/trokens/sav_decoupled_base.yaml'))
+    from trokens.config.ablation import resolve_ablation_cfg
+    resolve_ablation_cfg(cfg)
     logits = torch.randn(2, 3, requires_grad=True)
     labels = torch.tensor([[1., 0., -1.], [0., 1., 0.]])
     aux = dict(query_partial_q2s_base_logits=logits)

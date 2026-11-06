@@ -34,6 +34,8 @@ def construct_optimizer(model, cfg):
 
     verifier_parameters = []
     verifier_zero_parameters = []
+    entity_parameters = []
+    entity_cfg = getattr(getattr(cfg, 'FEW_SHOT', None), 'ENTITY_CHANGE', None)
     verifier_cfg = getattr(
         getattr(getattr(cfg, "FEW_SHOT", None), "QUERY_CLASS_MATCHABILITY", None),
         "LEARNED_VERIFIER", None,
@@ -48,6 +50,9 @@ def construct_optimizer(model, cfg):
         skip = model.no_weight_decay()
 
     for name, p in model.named_parameters():
+        if 'entity_change_verifier.' in name and p.requires_grad:
+            entity_parameters.append(p)
+            continue
         if "query_evidence_verifier" in name and p.requires_grad:
             if p.ndim <= 1 or name.endswith(".bias"):
                 verifier_zero_parameters.append(p)
@@ -76,6 +81,11 @@ def construct_optimizer(model, cfg):
         {"params": verifier_parameters, "weight_decay": verifier_weight_decay},
         {"params": verifier_zero_parameters, "weight_decay": 0.0},
     ]
+    if entity_parameters:
+        multiplier = float(entity_cfg.LR_MULT)
+        optim_params.append({'params': entity_parameters, 'weight_decay': 0.,
+                             'lr': cfg.SOLVER.BASE_LR * multiplier, 'lr_mult': multiplier,
+                             'group_name': 'entity_change_scalars'})
 
     optim_params = [x for x in optim_params if len(x["params"])]
 
@@ -86,6 +96,7 @@ def construct_optimizer(model, cfg):
         len(zero_parameters),
         len(no_grad_parameters),
         len(verifier_parameters),
+        len(entity_parameters),
         len(verifier_zero_parameters)]), "parameter size does not match: {} + {} + {} + {} != {}".format(
         len(non_bn_parameters),
         len(bn_parameters),
@@ -152,4 +163,7 @@ def set_lr(optimizer, new_lr, log = False):
     if log:
         logger.info("Set lr %s for all parameter groups", new_lr["lr"])
     for param_group in optimizer.param_groups:
-        param_group["lr"] = new_lr["lr"]
+        param_group["lr"] = new_lr["lr"] * param_group.get('lr_mult', 1.0)
+        if log and param_group.get('lr_mult', 1.) != 1.:
+            logger.info('Set %s lr=%s (multiplier=%s)', param_group.get('group_name', 'custom'),
+                        param_group['lr'], param_group['lr_mult'])

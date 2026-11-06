@@ -1,10 +1,8 @@
-"""Learned, class-shared Query evidence verification (no Query labels).
+"""Same-condition positive/negative Support verification of Query evidence.
 
-Raw semantic acceptance m and Post positive/confuser preference rho are learned
-independently. Verifier features are never inserted into visual prototypes.
-The three-state masses are operational gates, not calibrated latent-state labels.
+Only Post relative evidence rho is learned here. Trajectory-change residuals
+live in entity_change_verifier; neither branch modifies visual prototypes.
 """
-
 import math
 from contextlib import nullcontext
 
@@ -21,15 +19,6 @@ def _unit(x):
     return F.normalize(x, dim=-1, eps=1e-6)
 
 
-def _masked_softmax(logits, valid):
-    """FP32 softmax with an explicitly finite path for all-invalid rows."""
-    valid = valid.bool().expand_as(logits)
-    has_any = valid.any(dim=-1, keepdim=True)
-    scores = logits.float().masked_fill(~valid, -torch.inf)
-    scores = torch.where(has_any, scores, torch.zeros_like(scores))
-    return scores.softmax(dim=-1) * valid.float()
-
-
 def _frame_mean(value, valid, fallback=0.0):
     valid = valid.expand_as(value)
     count = valid.sum(dim=-1)
@@ -37,246 +26,10 @@ def _frame_mean(value, valid, fallback=0.0):
     return torch.where(count > 0, mean, torch.full_like(mean, fallback))
 
 
-class FP32LayerNorm(nn.LayerNorm):
-    """Keep normalization in FP32 without changing checkpoint parameter keys."""
-
-    def forward(self, value):
-        with torch.autocast(device_type=value.device.type, enabled=False):
-            return F.layer_norm(value.float(), self.normalized_shape, self.weight, self.bias, self.eps)
-
-
-class SemanticRelationQuality(nn.Module):
-    """Raw semantic evidence plus a bounded, Support-conditioned vector relation.
-
-    No class-specific parameters, old Top-K scores, Support thresholds or Post
-    features. Spatial pooling is private to this head: it never replaces pi.
-    Reference attention keeps every Support frame until the Query reads it.
-    """
-
-    def __init__(self, input_dim, cfg):
-        super().__init__()
-        d = int(getattr(cfg, "QUALITY_HIDDEN_DIM", 64))
-        if d <= 0:
-            raise ValueError("QUALITY_HIDDEN_DIM must be positive.")
-        self.dim = d
-        for attr, field, default, positive in (
-            ("patch_temperature", "QUALITY_PATCH_TEMPERATURE", 0.07, True),
-            ("reference_temperature", "QUALITY_REFERENCE_TEMPERATURE", 0.10, True),
-            ("max_pool_delta", "QUALITY_MAX_POOL_DELTA", 0.5, False),
-            ("max_reference_delta", "QUALITY_MAX_REFERENCE_DELTA", 0.5, False),
-            ("max_evidence_delta", "QUALITY_MAX_EVIDENCE_DELTA", 0.10, False),
-        ):
-            value = float(getattr(cfg, field, default))
-            if not math.isfinite(value) or (value <= 0 if positive else value < 0):
-                raise ValueError(f"{field} must be finite and {'positive' if positive else 'non-negative'}.")
-            # Save the semantic bounds in the checkpoint, not as learned knobs.
-            self.register_buffer(attr, torch.tensor(value, dtype=torch.float32))
-        self.relation_strength = float(getattr(cfg, "QUALITY_RELATION_STRENGTH", 1.0))
-        if not math.isfinite(self.relation_strength) or not 0 <= self.relation_strength <= 1:
-            raise ValueError("QUALITY_RELATION_STRENGTH must be in [0,1].")
-        scale = float(getattr(cfg, "QUALITY_SCALE_INIT", 10.0))
-        bias = float(getattr(cfg, "QUALITY_BIAS_INIT", 0.0))
-        if not math.isfinite(scale) or scale <= 1e-4:
-            raise ValueError("QUALITY_SCALE_INIT must be finite and greater than 1e-4.")
-        if not math.isfinite(bias):
-            raise ValueError("QUALITY_BIAS_INIT must be finite.")
-        value = scale - 1e-4
-        self.scale_raw = nn.Parameter(torch.tensor(value + math.log(-math.expm1(-value))))
-        self.bias = nn.Parameter(torch.tensor(bias))
-        self.projection = nn.Linear(input_dim, d, bias=False)
-        self.pool = nn.Sequential(
-            FP32LayerNorm(2 * d + 1), nn.Linear(2 * d + 1, d), nn.GELU(), nn.Linear(d, 1),
-        )
-        self.relation = nn.Sequential(
-            FP32LayerNorm(5 * d + 5), nn.Linear(5 * d + 5, 2 * d), nn.GELU(), nn.Linear(2 * d, 1),
-        )
-        # Near the semantic anchor, but not exactly zero: all lower layers can
-        # receive gradients on the first step (including checkpointed/DDP use).
-        for head in (self.pool[-1], self.relation[-1]):
-            nn.init.normal_(head.weight, std=0.01)
-            nn.init.zeros_(head.bias)
-
-    def _pool(self, raw, projected, text, projected_text, valid):
-        with torch.autocast(device_type=raw.device.type, enabled=False):
-            evidence = torch.matmul(raw.float(), text.float().T).permute(3, 0, 1, 2)
-        x, e = projected[None], projected_text[:, None, None, None]
-        feature = torch.cat((x - e, x * e, evidence.unsqueeze(-1)), dim=-1)
-        delta = self.max_pool_delta * self.pool(feature).squeeze(-1).float().tanh()
-        weights = _masked_softmax(evidence / self.patch_temperature + delta, valid[None])
-        return weights, evidence, delta
-
-    def _references(self, raw, projected, text, projected_text, valid):
-        weights, _, _ = self._pool(raw, projected, text, projected_text, valid)
-        with torch.autocast(device_type=raw.device.type, enabled=False):
-            # Contract K as a matrix row axis, not a broadcast batch axis:
-            # otherwise matmul materializes K copies of all D=1024 tokens.
-            references = _unit(torch.einsum("kstn,stnd->kstd", weights, raw.float()))
-            reference_text = (references * text[:, None, None]).sum(-1).flatten(1)
-        references = references.flatten(1, 2)
-        return references, self.projection(references), reference_text
-
-    def _relation_inputs(self, raw, projected, text, projected_text, valid,
-                         references, projected_references, reference_text, reference_mask):
-        """Shared v3 evidence reading, before either quality decision rule."""
-        weights, evidence, pool_delta = self._pool(raw, projected, text, projected_text, valid)
-        # Original Raw geometry determines both the absolute evidence and the
-        # reference-read anchor. Only low-dimensional relation GEMMs use AMP.
-        with torch.autocast(device_type=raw.device.type, enabled=False):
-            # Query patches are shared by classes. One GEMM avoids expanding
-            # [Q,T,N,D] to [K,Q,T,N,D] just to compare class reference sets.
-            cosine = raw.float().reshape(-1, raw.shape[-1]) @ references.float().flatten(0, 1).T
-            cosine = cosine.view(*raw.shape[:3], *references.shape[:2]).permute(3, 0, 1, 2, 4)
-        x, e = projected[None], projected_text[:, None, None, None]
-        ref_difference = projected_references - projected_text[:, None]
-        delta = torch.matmul(x - e, ref_difference[:, None, None].transpose(-2, -1)).float()
-        delta = self.max_reference_delta * (delta / math.sqrt(self.dim)).tanh()
-        probability = _masked_softmax(
-            (cosine / self.reference_temperature + delta)[:, None].expand(-1, 2, -1, -1, -1, -1),
-            reference_mask[:, :, None, None, None, :],
-        )
-        reads = torch.matmul(probability.to(projected_references.dtype),
-                             projected_references[:, None, None, None])
-        pos, neg = reads.unbind(1)
-        # Retain absolute evidence even if all references are weak: softmax
-        # reference weights alone cannot represent that situation.
-        read_cosine = (probability * cosine[:, None]).sum(-1)
-        read_text = (probability * reference_text[:, None, None, None, None]).sum(-1)
-        pc, nc = read_cosine.unbind(1)
-        pt, nt = read_text.unbind(1)
-        relation = torch.cat((
-            (x - e).expand_as(pos), x - pos, x - neg, x * pos, x * neg,
-            torch.stack((evidence, pc, nc, pt, nt), dim=-1),
-        ), dim=-1)
-        return weights, evidence, pool_delta, relation
-
-    def _chunk(self, raw, projected, text, projected_text, valid,
-               references, projected_references, reference_text, reference_mask):
-        weights, evidence, pool_delta, relation = self._relation_inputs(
-            raw, projected, text, projected_text, valid,
-            references, projected_references, reference_text, reference_mask)
-        residual = self.relation(relation).squeeze(-1).float().tanh()
-        anchor = (weights * evidence).sum(-1)
-        correction = self.relation_strength * self.max_evidence_delta * (weights * residual).sum(-1)
-        scale = F.softplus(self.scale_raw.float()) + 1e-4
-        logits = scale * (anchor + correction) + self.bias.float()
-        saturation = (weights * (residual.abs() > 0.95).float()).sum(-1)
-        pool_shift = (weights * pool_delta.abs()).sum(-1)
-        return tuple(value.transpose(0, 1) for value in
-                     (logits, weights, anchor, correction, saturation, pool_shift))
-
-    def forward(self, raw_query, raw_support, text, query_valid, support_valid,
-                positive, negative, call, chunk_size):
-        qr, sr, et = (self.projection(x) for x in (raw_query, raw_support, text))
-        references = call(self._references, raw_support, sr, text, et, support_valid)
-        support_frames = support_valid.any(-1)[None]
-        mask = torch.stack(((support_frames & positive.T[:, :, None]).flatten(1),
-                            (support_frames & negative.T[:, :, None]).flatten(1)), dim=1)
-        available = mask.any(-1).all(-1)
-        parts = []
-        for start in range(0, raw_query.shape[0], chunk_size):
-            sl = slice(start, start + chunk_size)
-            parts.append(call(self._chunk, raw_query[sl], qr[sl], text, et, query_valid[sl], *references, mask))
-        logits, weights, anchor, correction, saturation, pool_shift = (
-            torch.cat(values) for values in zip(*parts))
-        frame_valid = query_valid.any(-1)[:, None]
-        valid = frame_valid & available[None, :, None]
-        mass = torch.where(available[None, :, None], logits.sigmoid(), torch.ones_like(logits))
-        mass = torch.where(frame_valid, mass, torch.zeros_like(mass))
-        return dict(quality=mass, quality_logits=logits, quality_valid=valid,
-                    quality_weights=weights, quality_reference_available=available,
-                    quality_anchor=anchor, quality_correction=correction,
-                    quality_correction_saturation=saturation, quality_pool_shift=pool_shift)
-
-
-class RelationDecisionQuality(SemanticRelationQuality):
-    """V3 evidence reader with a directly learned visual-relation decision.
-
-    Inherit the reader operations, NOT the v3 residual/scale parameters. Raw
-    cosine remains a feature and retrieval prior, never a mandatory logit term.
-    This is frame-level acceptance, not patch supervision/prototype rewriting.
-    """
-
-    def __init__(self, input_dim, cfg):
-        nn.Module.__init__(self)
-        d = int(getattr(cfg, "QUALITY_HIDDEN_DIM", 64))
-        local = int(getattr(cfg, "QUALITY_DECISION_LOCAL_DIM", 32))
-        readout = int(getattr(cfg, "QUALITY_DECISION_READOUT_DIM", 16))
-        for name, value in (("QUALITY_HIDDEN_DIM", d),
-                            ("QUALITY_DECISION_LOCAL_DIM", local),
-                            ("QUALITY_DECISION_READOUT_DIM", readout)):
-            if value <= 0:
-                raise ValueError(f"{name} must be positive.")
-        self.dim = d
-        for attr, field, default, positive in (
-            ("patch_temperature", "QUALITY_PATCH_TEMPERATURE", .07, True),
-            ("reference_temperature", "QUALITY_REFERENCE_TEMPERATURE", .10, True),
-            ("max_pool_delta", "QUALITY_MAX_POOL_DELTA", .5, False),
-            ("max_reference_delta", "QUALITY_MAX_REFERENCE_DELTA", .5, False),
-        ):
-            value = float(getattr(cfg, field, default))
-            if not math.isfinite(value) or (value <= 0 if positive else value < 0):
-                raise ValueError(f"{field} must be finite and {'positive' if positive else 'non-negative'}.")
-            self.register_buffer(attr, torch.tensor(value, dtype=torch.float32))
-        self.projection = nn.Linear(input_dim, d, bias=False)
-        self.pool = nn.Sequential(
-            FP32LayerNorm(2 * d + 1), nn.Linear(2 * d + 1, d), nn.GELU(), nn.Linear(d, 1),
-        )
-        self.relation_encoder = nn.Sequential(
-            FP32LayerNorm(5 * d + 5), nn.Linear(5 * d + 5, 2 * d), nn.GELU(),
-            nn.Linear(2 * d, local), nn.GELU(),
-        )
-        self.decision = nn.Sequential(nn.Linear(local, readout), nn.GELU(), nn.Linear(readout, 1))
-        for head in (self.pool[-1], self.decision[-1]):
-            nn.init.normal_(head.weight, std=.01)
-            nn.init.zeros_(head.bias)
-
-    def _chunk(self, raw, projected, text, projected_text, valid,
-               references, projected_references, reference_text, reference_mask):
-        weights, evidence, pool_delta, relation = self._relation_inputs(
-            raw, projected, text, projected_text, valid,
-            references, projected_references, reference_text, reference_mask)
-        local = self.relation_encoder(relation)
-        with torch.autocast(device_type=raw.device.type, enabled=False):
-            pooled = (weights.unsqueeze(-1) * local.float()).sum(-2)
-            semantic_evidence = (weights * evidence).sum(-1)
-            pool_shift = (weights * pool_delta.abs()).sum(-1)
-            feature_norm = pooled.norm(dim=-1)
-        logits = self.decision(pooled).squeeze(-1).float()
-        return tuple(value.transpose(0, 1) for value in
-                     (logits, weights, semantic_evidence, pool_shift, feature_norm))
-
-    def forward(self, raw_query, raw_support, text, query_valid, support_valid,
-                positive, negative, call, chunk_size):
-        qr, sr, et = (self.projection(x) for x in (raw_query, raw_support, text))
-        references = call(self._references, raw_support, sr, text, et, support_valid)
-        support_frames = support_valid.any(-1)[None]
-        mask = torch.stack(((support_frames & positive.T[:, :, None]).flatten(1),
-                            (support_frames & negative.T[:, :, None]).flatten(1)), dim=1)
-        available = mask.any(-1).all(-1)
-        parts = []
-        for start in range(0, raw_query.shape[0], chunk_size):
-            sl = slice(start, start + chunk_size)
-            parts.append(call(self._chunk, raw_query[sl], qr[sl], text, et, query_valid[sl], *references, mask))
-        logits, weights, evidence, pool_shift, feature_norm = (
-            torch.cat(values) for values in zip(*parts))
-        frame_valid = query_valid.any(-1)[:, None]
-        valid = frame_valid & available[None, :, None]
-        mass = torch.where(available[None, :, None], logits.sigmoid(), torch.ones_like(logits))
-        mass = torch.where(frame_valid, mass, torch.zeros_like(mass))
-        return dict(quality=mass, quality_logits=logits, quality_valid=valid,
-                    quality_weights=weights, quality_reference_available=available,
-                    quality_semantic_evidence=evidence, quality_pool_shift=pool_shift,
-                    quality_relation_feature_norm=feature_norm)
-
-
 class QueryEvidenceVerifier(nn.Module):
-    def __init__(self, input_dim, cfg, quality=True, uniqueness=True):
+    def __init__(self, input_dim, cfg, uniqueness=True):
         super().__init__()
-        self.quality = quality
         self.uniqueness = uniqueness
-        self.quality_mode = str(getattr(cfg, "QUALITY_MODE", "semantic_relation"))
-        if self.quality_mode not in ("semantic_relation", "relation_decision"):
-            raise ValueError("QUALITY_MODE must be semantic_relation or relation_decision.")
         self.detach_inputs = bool(getattr(cfg, "DETACH_INPUTS", True))
         self.chunk_size = int(getattr(cfg, "QUERY_CHUNK_SIZE", 4))
         if self.chunk_size <= 0:
@@ -289,12 +42,8 @@ class QueryEvidenceVerifier(nn.Module):
         if not math.isfinite(self.warmup_fraction) or not 0 <= self.warmup_fraction <= 1:
             raise ValueError("TRANSPORT_WARMUP_FRACTION must be in [0,1].")
         self.transport_progress = 1.0
-        # Preserve trained checkpoint identifiers, including quality ablation.
-        version = (5 if self.quality_mode == "relation_decision" else 3) if quality else 2
-        self.register_buffer("architecture_version", torch.tensor(version, dtype=torch.int64))
-        if quality:
-            quality_head = RelationDecisionQuality if self.quality_mode == "relation_decision" else SemanticRelationQuality
-            self.semantic_quality = quality_head(input_dim, cfg)
+        # Keep the rho-only checkpoint version and scalar names unchanged.
+        self.register_buffer("architecture_version", torch.tensor(2, dtype=torch.int64))
         if uniqueness:
             # Only aggregation/calibration are learned. Never rotate/compress
             # the Post metric space or add a feature-only classifier shortcut.
@@ -329,29 +78,6 @@ class QueryEvidenceVerifier(nn.Module):
             known = known & support_known.bool()
         return (support_labels > 0.5) & known, (support_labels <= 0.5) & known
 
-    def compute_raw_quality(self, raw_query, raw_support, text, query_valid,
-                            support_raw_valid, support_labels, support_known=None):
-        """Class-batched Raw-only m; learned references remain differentiable.
-
-        Independent of Post/gates/rho, so the conditional encoder can hoist
-        this once per class group instead of recomputing per video AND class.
-        """
-        if not self.quality:
-            return {}
-        if raw_query is None or raw_support is None:
-            raise ValueError("Learned quality requires aligned pre-Pointformer Raw DinoTxt tokens.")
-        precision = (nullcontext() if self.amp_enabled and raw_query.is_cuda
-                     else torch.autocast(device_type=raw_query.device.type, enabled=False))
-        with precision:
-            positive, negative = self._support_signs(support_labels, support_known, text.shape[0])
-            if raw_query.shape[:3] != query_valid.shape or raw_support.shape[:3] != support_raw_valid.shape:
-                raise ValueError("Raw verifier tokens and validity masks must align in B/T/N.")
-            qr, sr, et = (_unit(self._input(x)) for x in (raw_query, raw_support, text))
-            return self.semantic_quality(
-                qr, sr, et, query_valid, support_raw_valid, positive, negative,
-                self._call, self.chunk_size)
-
-
     def _metric_aggregate(self, similarities, valid):
         """Count-normalized smooth maximum, separately for each reference set.
 
@@ -381,43 +107,31 @@ class QueryEvidenceVerifier(nn.Module):
         neg = (scale * (pi * neg).sum(-1)).transpose(0, 1)
         return pos - neg, pos, neg
 
-    def forward(self, *, raw_query, raw_support, text, post_query, post_references,
-                query_weights, query_valid, support_raw_valid, support_frame_valid,
-                support_labels, support_known=None, quality_output=None):
-        """Only Support labels enter this API; outputs are [Q,K,T] (or weights).
+    def forward(self, *, text, post_query, post_references, query_weights,
+                query_valid, support_frame_valid, support_labels, support_known=None):
+        """Support labels alone define references; evidence outputs are [Q,K,T].
 
-        post_references is [S,K,T,D], never the class-averaged matcher prototype.
-        Detach is applied BEFORE learned projections, not after learned memory.
-        Optional quality_output reuses an externally computed Raw-only m;
-        an empty dict requests rho only when the caller merges m afterward.
+        post_references is [S,K,T,D], not the class-averaged matcher prototype.
         """
         precision = (nullcontext() if self.amp_enabled and post_query.is_cuda
                      else torch.autocast(device_type=post_query.device.type, enabled=False))
         with precision:
             return self._forward_impl(
-                raw_query, raw_support, text, post_query, post_references,
-                query_weights, query_valid, support_raw_valid, support_frame_valid,
-                support_labels, support_known, quality_output,
+                text, post_query, post_references, query_weights, query_valid,
+                support_frame_valid, support_labels, support_known,
             )
 
-    def _forward_impl(self, raw_query, raw_support, text, post_query, post_references,
-                      query_weights, query_valid, support_raw_valid, support_frame_valid,
-                      support_labels, support_known, quality_output=None):
+    def _forward_impl(self, text, post_query, post_references, query_weights,
+                      query_valid, support_frame_valid, support_labels, support_known):
         q, t, n, _ = post_query.shape
         k = text.shape[0]
         positive_labels, negative_labels = self._support_signs(support_labels, support_known, k)
         frame_valid = query_valid.any(dim=-1)
-        if self.quality and quality_output is None:
-            if raw_query is None or raw_support is None:
-                raise ValueError("Learned quality requires aligned pre-Pointformer Raw DinoTxt tokens.")
-            if raw_query.shape[:3] != (q, t, n) or raw_support.shape[:3] != support_raw_valid.shape:
-                raise ValueError("Raw verifier tokens and validity masks must align in B/T/N.")
-            qr, sr, et = (_unit(self._input(x)) for x in (raw_query, raw_support, text))
         if self.uniqueness:
             qp = _unit(self._input(post_query))
             sp = _unit(self._input(post_references))
             pi = self._input(query_weights).float()
-        output = {} if quality_output is None else dict(quality_output)
+        output = {}
 
         def masks(valid_frames):
             # [K,S,T] -> [K,R], preserving per-class Support identities.
@@ -428,11 +142,6 @@ class QueryEvidenceVerifier(nn.Module):
             # Retain the safe dummy element used for empty reference sets.
             return torch.cat((valid, ~available.unsqueeze(-1)), dim=-1), available
 
-        if self.quality and quality_output is None:
-            output.update(self.semantic_quality(
-                qr, sr, et, query_valid, support_raw_valid, positive_labels, negative_labels,
-                self._call, self.chunk_size,
-            ))
         if self.uniqueness:
             mask, signs_available = masks(support_frame_valid.permute(1, 0, 2))
             available = signs_available.all(dim=1)
@@ -469,9 +178,7 @@ def set_verifier_training_progress(model, update_index, total_updates):
 def build_query_q2s_aux(model, values, metadata, raw):
     """Preserve existing routing and matcher, replacing only evidence estimates."""
     from trokens.models.query_matching import (
-        build_class_support_references, classwise_frame_similarity,
-        factorize_frame_hypothesis_states, hypothesis_mass_bimhm_logits,
-        normalize_patch_region_weights,
+        build_class_support_references, normalize_patch_region_weights,
     )
 
     cfg = model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY
@@ -525,7 +232,7 @@ def build_query_q2s_aux(model, values, metadata, raw):
         "query_partial_label_axis_global_labels": class_ids,
         "query_partial_target_label_indices": torch.arange(class_ids.numel(), device=values.device),
     }
-    if not (judgments.quality or judgments.uniqueness):
+    if not judgments.uniqueness:
         result.update(query_partial_q2s_logits=base_logits,
                       query_partial_q2s_temporal_logits=base_logits,
                       query_class_matchability=torch.ones_like(base_logits))
@@ -533,10 +240,8 @@ def build_query_q2s_aux(model, values, metadata, raw):
     verifier = getattr(model, "query_evidence_verifier", None)
     if verifier is None:
         raise RuntimeError("Learned verifier must be registered at model construction, before optimizer/DDP.")
-    if (verifier.quality, verifier.uniqueness) != (judgments.quality, judgments.uniqueness):
+    if verifier.uniqueness != judgments.uniqueness:
         raise ValueError("Rebuild the model after changing learned judgment switches.")
-    if judgments.quality and (raw is None or raw.shape[:3] != values.shape[:3]):
-        raise ValueError("Learned quality requires aligned pre-Pointformer Raw DinoTxt tokens.")
     references = support_frame_valid = None
     if judgments.uniqueness:
         references, support_frame_valid, _, _, _ = build_class_support_references(
@@ -546,11 +251,9 @@ def build_query_q2s_aux(model, values, metadata, raw):
     query_valid = evidence_mask.index_select(0, query_indices)
     hypothesis_weights = normalize_patch_region_weights(query_weights, query_valid)
     outputs = verifier(
-        raw_query=raw.index_select(0, query_indices) if judgments.quality else None,
-        raw_support=raw[support_mask] if judgments.quality else None,
         text=text, post_query=values.index_select(0, query_indices),
         post_references=references, query_weights=hypothesis_weights,
-        query_valid=query_valid, support_raw_valid=evidence_mask[support_mask],
+        query_valid=query_valid,
         support_frame_valid=support_frame_valid, support_labels=labels[support_mask],
         support_known=known[support_mask],
     )
@@ -565,22 +268,21 @@ def finish_query_evidence_aux(model, result, query_prototypes, support_prototype
     cfg = model.cfg.FEW_SHOT.QUERY_CLASS_MATCHABILITY
     judgments = resolve_query_judgments(cfg)
     base_logits = result["query_partial_q2s_base_logits"]
-    if not (judgments.quality or judgments.uniqueness):
+    if not judgments.uniqueness:
         result.update(query_partial_q2s_logits=base_logits,
                       query_partial_q2s_temporal_logits=base_logits,
                       query_class_matchability=torch.ones_like(base_logits))
         return result
     from trokens.models.query_matching import (
-        classwise_frame_similarity, factorize_frame_hypothesis_states,
+        classwise_frame_similarity, rho_frame_hypothesis_states,
         hypothesis_mass_bimhm_logits,
     )
     verifier = model.query_evidence_verifier
     alpha = float(getattr(model.pot_route_cfg, "QUERY_PARTIAL_LOGIT_ALPHA", 10.0))
     shape = (*base_logits.shape, query_prototypes.shape[2])
     neutral = base_logits.new_ones(shape, dtype=torch.float32)
-    mass = outputs.get("quality", neutral)
     rho = outputs.get("relation", neutral)
-    states = factorize_frame_hypothesis_states(mass, rho)
+    states = rho_frame_hypothesis_states(rho)
     strength = float(getattr(cfg, "ABSOLUTE_MASS_TRANSPORT_STRENGTH", 1.0))
     if model.training:
         strength *= verifier.transport_progress
@@ -590,7 +292,7 @@ def finish_query_evidence_aux(model, result, query_prototypes, support_prototype
         unmatched_cost=float(getattr(cfg, "ABSOLUTE_MASS_UNMATCHED_COST", 0.0)),
         one_sided_transport=bool(getattr(cfg, "ABSOLUTE_MASS_ONE_SIDED", True)),
     )
-    frame_valid = query_valid.any(dim=-1).unsqueeze(1).expand_as(mass)
+    frame_valid = query_valid.any(dim=-1).unsqueeze(1).expand_as(rho)
     result.update({
         "query_partial_q2s_logits": transport["logits"],
         "query_partial_q2s_temporal_logits": transport["logits"],
@@ -611,35 +313,6 @@ def finish_query_evidence_aux(model, result, query_prototypes, support_prototype
     for state, value in states.items():
         result["query_frame_" + state] = value
         result["query_frame_" + state + "_mean"] = _frame_mean(value, frame_valid)
-    if judgments.quality:
-        quality_weights = outputs["quality_weights"]
-        result.update({
-            "query_frame_absolute_patch_mass": mass,
-            "query_quality_mass_mean": _frame_mean(mass, frame_valid),
-            "query_quality_logits": outputs["quality_logits"],
-            "query_quality_valid": outputs["quality_valid"],
-            "query_quality_logit_mean": _frame_mean(outputs["quality_logits"], outputs["quality_valid"]),
-            "query_quality_reference_available": outputs["quality_reference_available"],
-            "query_quality_patch_weights": quality_weights,
-            "query_quality_effective_patches_mean": _frame_mean(
-                1 / quality_weights.square().sum(-1).clamp_min(1e-6), frame_valid),
-            "query_quality_top1_mass_mean": _frame_mean(quality_weights.max(-1).values, frame_valid),
-        })
-        names = (("anchor", "correction", "correction_saturation", "pool_shift")
-                 if verifier.quality_mode == "semantic_relation"
-                 else ("semantic_evidence", "pool_shift", "relation_feature_norm"))
-        for name in names:
-            value = outputs["quality_" + name]
-            result["query_quality_" + name] = value
-            result["query_quality_" + name + "_mean"] = _frame_mean(value, outputs["quality_valid"])
-        if verifier.quality_mode == "semantic_relation":
-            result["query_quality_correction_abs_mean"] = _frame_mean(
-                outputs["quality_correction"].abs(), outputs["quality_valid"])
-            head = verifier.semantic_quality
-            result.update(query_quality_scale=F.softplus(head.scale_raw.detach().float()) + 1e-4,
-                          query_quality_bias=head.bias.detach().float(),
-                          query_quality_relation_strength=mass.new_tensor(head.relation_strength),
-                          query_quality_max_evidence_delta=head.max_evidence_delta.detach().float())
     if judgments.uniqueness:
         result.update({
             "query_frame_matchability": rho,

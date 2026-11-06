@@ -286,9 +286,9 @@ def compute_query_partial_q2s_loss(
 
     if bool(getattr(match_cfg, "BASE_ONLY_LOSS_ENABLE", False)):
         judgments = resolve_query_judgments(match_cfg)
-        if (judgments.quality or judgments.uniqueness
+        if (judgments.uniqueness
                 or bool(getattr(match_cfg, "DUAL_LOGIT_LOSS_ENABLE", False))):
-            raise ValueError("BASE_ONLY_LOSS_ENABLE requires both judgments and dual-logit loss OFF.")
+            raise ValueError("BASE_ONLY_LOSS_ENABLE requires rho and dual-logit loss OFF.")
         if (float(match_cfg.BASE_LOGIT_LOSS_WEIGHT) != 1.0
                 or float(match_cfg.VERIFIED_LOGIT_LOSS_WEIGHT) != 0.0):
             raise ValueError("Base-only loss requires base/verified weights 1/0.")
@@ -325,7 +325,6 @@ def compute_query_partial_q2s_loss(
         judgments = resolve_query_judgments(match_cfg)
         verifier_cfg = getattr(match_cfg, "LEARNED_VERIFIER", None)
         for name, enabled, weight_name in (
-            ("quality", judgments.quality, "SEMANTIC_MIL_WEIGHT"),
             ("relation", judgments.uniqueness, "RELATION_MIL_WEIGHT"),
         ):
             if not enabled:
@@ -344,6 +343,26 @@ def compute_query_partial_q2s_loss(
             diagnostics[f"q2s_{name}_mil_valid_fraction"] = mil["valid"].float().mean().detach()
         if isinstance(few_shot_aux, dict) and "query_verifier_transport_strength" in few_shot_aux:
             diagnostics["q2s_verifier_transport_strength"] = few_shot_aux["query_verifier_transport_strength"].detach()
+
+    change = getattr(getattr(cfg, 'FEW_SHOT', None), 'ENTITY_CHANGE', None)
+    if change is not None and change.ENABLE:
+        for channel in ('state', 'geo'):
+            if not getattr(change, channel.upper() + '_ENABLE'):
+                continue
+            key = 'entity_' + channel
+            logits, valid = few_shot_aux[key + '_logits'], few_shot_aux[key + '_valid'].bool()
+            if logits.shape != labels.shape or valid.shape != labels.shape:
+                raise ValueError('Entity evidence must align with Query/class targets.')
+            valid = valid & torch.isfinite(labels) & (labels >= 0) & (labels <= 1)
+            aux_loss = (F.binary_cross_entropy_with_logits(logits.float()[valid], labels[valid])
+                        if valid.any() else logits.sum() * 0.)
+            learned_aux_loss = learned_aux_loss + getattr(change, channel.upper() + '_AUX_WEIGHT') * aux_loss
+            diagnostics['q2s_entity_' + channel + '_loss'] = aux_loss.detach()
+            diagnostics['q2s_entity_' + channel + '_valid_fraction'] = valid.float().mean().detach()
+            for name in ('lambda_' + channel, channel + '_temperature', channel + '_scale'):
+                diagnostics['q2s_entity_' + name] = few_shot_aux['entity_' + name].detach()
+            contribution = few_shot_aux['entity_' + channel + '_contribution'].detach()
+            diagnostics['q2s_entity_' + channel + '_contribution_abs'] = contribution.abs().mean()
 
     if not dual_enabled:
         loss = verified_loss + learned_aux_loss
@@ -425,25 +444,20 @@ def get_query_matchability_metrics(few_shot_aux, q2s_labels):
     if few_shot_aux.get("query_evidence_enabled", False):
         metrics = {}
         pairs = {
-            "verifier_quality": "query_quality_mass_mean",
             "verifier_rho": "query_frame_matchability_mean",
-            "verifier_quality_logit": "query_quality_logit_mean",
             "verifier_relation_logit": "query_relation_logit_mean",
             "verifier_target_mass": "query_frame_target_mass_mean",
             "verifier_confuser_mass": "query_frame_confuser_mass_mean",
             "verifier_null_mass": "query_frame_null_mass_mean",
-            "verifier_quality_effective_patches": "query_quality_effective_patches_mean",
-            "verifier_quality_top1_mass": "query_quality_top1_mass_mean",
-            "verifier_quality_anchor": "query_quality_anchor_mean",
-            "verifier_quality_correction": "query_quality_correction_mean",
-            "verifier_quality_correction_abs": "query_quality_correction_abs_mean",
-            "verifier_quality_correction_saturation": "query_quality_correction_saturation_mean",
-            "verifier_quality_pool_shift": "query_quality_pool_shift_mean",
-            "verifier_quality_semantic_evidence": "query_quality_semantic_evidence_mean",
-            "verifier_quality_relation_feature_norm": "query_quality_relation_feature_norm_mean",
             "verifier_route_effective_patches": "query_evidence_effective_patches_mean",
             "verifier_route_top1_mass": "query_evidence_top1_mass_mean",
             "verifier_logit_delta": "query_frame_transport_logit_delta",
+            "competition_penalty": "query_competition_penalty_mean",
+            "competition_column_std": "query_competition_column_std",
+            "competition_logit_delta": "query_competition_logit_delta",
+            "competition_eligible": "query_competition_eligible_fraction",
+            "competition_q2s_switch": "query_competition_q2s_switch",
+            "competition_s2q_switch": "query_competition_s2q_switch",
         }
         for name, key in pairs.items():
             value = few_shot_aux.get(key)
@@ -454,12 +468,11 @@ def get_query_matchability_metrics(few_shot_aux, q2s_labels):
             for suffix, mask in (("positive", labels > 0.5), ("negative", labels == 0)):
                 selected = value[mask]
                 metrics[f"{name}_{suffix}"] = selected.float().mean() if selected.numel() else value.new_zeros(())
-        for branch in ("quality", "relation"):
+        for branch in ("relation",):
             available = few_shot_aux.get(f"query_{branch}_reference_available")
             if available is not None:
                 metrics[f"verifier_{branch}_reference_fraction"] = available.float().mean()
-        for name in ("metric_temperature", "metric_scale", "quality_scale", "quality_bias",
-                     "quality_relation_strength", "quality_max_evidence_delta"):
+        for name in ("metric_temperature", "metric_scale"):
             value = few_shot_aux.get("query_" + name)
             if value is not None:
                 metrics["verifier_" + name] = value.float()
@@ -476,14 +489,6 @@ def get_query_evidence_csv_fields(few_shot_aux, labels):
         "query_class_base_score": "query_partial_q2s_base_logits",
         "query_class_temporal_score": "query_partial_q2s_temporal_logits",
         "query_class_matchability": "query_class_matchability",
-        "query_quality_mass": "query_quality_mass_mean",
-        "query_quality_logit": "query_quality_logit_mean",
-        "query_quality_anchor": "query_quality_anchor_mean",
-        "query_quality_correction": "query_quality_correction_mean",
-        "query_quality_correction_abs": "query_quality_correction_abs_mean",
-        "query_quality_correction_saturation": "query_quality_correction_saturation_mean",
-        "query_quality_semantic_evidence": "query_quality_semantic_evidence_mean",
-        "query_quality_relation_feature_norm": "query_quality_relation_feature_norm_mean",
         "query_relation_logit": "query_relation_logit_mean",
         "query_target_mass": "query_frame_target_mass_mean",
         "query_confuser_mass": "query_frame_confuser_mass_mean",

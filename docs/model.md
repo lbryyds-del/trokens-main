@@ -1,75 +1,48 @@
-# 默认模型与数据集配置
+# 当前 SAV 模型
 
-当前 SAV 与 TinyVIRAT 使用[统一的四项消融开关](sav_ablation.md)，默认 Support / Query 文本解耦及 m/ρ(p) 全关闭，HoD / CTD（CrossMotion）全开启。
-两份主配置的公共训练/模型设置一致；历史对照配置未修改。
+默认入口：`configs/trokens/sav.yaml`。本页描述 2026-11-06 收敛后的实现，其他数据集仍按各自配置运行。
 
-## 默认无解耦、双运动模块数据流
+## 模型路径
 
-1. 冻结的 DinoTxt 提供视觉特征，读取已有轨迹缓存；不加载类别文本编码器。
-2. 外观特征叠加 CrossMotion、HoD 运动特征，保留位置编码。
-3. Support / Query 均走原始 `pt_forward`，不拼文本、不复制类别分支。
-4. 正 Support 类内先平均视觉 patch；Support 原型和 Query 各自经过 ReLU，再做空间均值。
-5. 使用原始负双向最近帧距离匹配，不使用 `10*S-2`；保留全局分类和原始匹配 BCE，
-   不创建 m/ρ 判断头，不做匹配修正或辅助损失。
+1. 冻结 DinoTxt，读取既有轨迹缓存，构造 Query/Support 的同候选类别条件化表示。
+2. 原 ρ：同条件正负 Support 相对证据，以单向 transport 修正外观匹配。
+3. 轨迹变化：轨迹簇状态变化与几何运动分别生成正负相对证据。
+4. 分数端双向相加：`z = z_rho + lambda_state * L_state + lambda_geo * L_geo`。
 
-模型只使用 Support 标签和 episode 候选类别。Query 真值用于损失与指标计算。
+m 已从网络、损失、配置及诊断输出中删除；竞争配对、Query-only 梯度反馈也已删除。没有增加对应绑定、可靠度门控或单向变化否决。HoD/CTD 特征融合保持关闭；轨迹几何证据不是 HoD/CTD 分支。
+
+Query 真值只用于监督和评估，不参与推理证据的构造。未知 Support 标签不作负标签。缺少正/负有效参考时，该证据不参与融合或辅助监督。
+
+## 实现入口
 
 | 文件 | 职责 |
 | --- | --- |
-| `trokens/models/pointformer.py` | 特征提取、运动融合、时空注意力与类别路由 |
-| `trokens/models/text_concat_conditioning.py` | episode 接口、文本拼接/通用编码消融、空间聚合和匹配 |
-| `trokens/models/query_evidence_verifier.py` | Raw 质量、Post 独特性判断及匹配修正 |
-| `trokens/models/query_matching.py` | Support 参考、帧状态质量、双向匹配 |
-| `tools/few_shot_multilabel.py` | 多标签监督、损失和诊断导出 |
+| `trokens/models/text_concat_conditioning.py` | 文本条件编码、同条件参考、匹配及证据接入 |
+| `trokens/models/query_evidence_verifier.py` | 原 ρ 正负相对核验与 transport |
+| `trokens/models/entity_change_verifier.py` | 轨迹簇变化证据、几何证据、加性融合 |
+| `trokens/datasets/entity_tracks.py` | 轨迹簇与几何元数据，按不重复轨迹计数 |
+| `tools/few_shot_multilabel.py` | base/final BCE、ρ MIL 和变化通道辅助 BCE |
+| `trokens/models/optimizer.py` | 新标量独立参数组及学习率倍率 |
 
-## SAV 配置
+## 配置与训练
 
-入口为 `configs/trokens/sav.yaml`，默认输出为 `output/sav`。
-独立消融入口 `configs/trokens/sav_shared_support_query.yaml` 输出 `output/sav_shared_support_query_m_rho_off`。
-原仅 Support 拼接版保留在 `configs/trokens/sav_text_concat_shared_query.yaml`。
-原双侧拼接 m/ρ 开启版保留在 `configs/trokens/sav_text_concat_s1_m_rho_on.yaml`，仍输出 `output/savo`。
-原单文本关闭版固定在 `configs/trokens/sav_text_concat_s1_base.yaml`，有效配置与切换前一致。
-原 32 份版本保留为 `configs/trokens/sav_text_concat_s32.yaml`，两种 token 数量的 checkpoint 不可混用。
+5-way 1-shot；每类 6 个训练 Query；每轮 2,000 episodes；8 帧、256 个采样点。基础学习率 3e-5，10 轮、3 轮 warmup、cosine，2 卡 × 累积 2。变化分支输入断梯度，融合系数零初始化；六个新增标量使用 100 倍学习率、零 weight decay。融合改变 final BCE，因此主路径梯度仍会改变。
 
-- 训练协议：5-way、1-shot，每类 6 个训练 Query；每轮 2000 个训练 episode，10000 个测试 episode，20 轮训练。
-- 轨迹：每段 8 帧、256 个点，空间读出采用 `QUERY_MASK_MODE: all`；轨迹缓存和独立可见性信息保留。
-- 编码：`DECOUPLING.QUERY_ENABLE` / `SUPPORT_ENABLE` 独立控制两侧，当前均关闭。
-- 判断：`DECOUPLING.M_ENABLE` / `RHO_ENABLE` 当前均关闭，transport 和两个辅助权重自动归零。
-- 运动：HoD 和 CTD（CrossMotion）均开启。
-- 监督：`L_global + L_original_q2s_BCE`，无重复 final BCE。
-- 优化：AdamW、cosine，学习率 `1e-4`，5 轮 warmup，梯度累积 2 步。
-- 执行：原始支路不使用 `TEXT_CONCAT_ST` 的分块/checkpoint 或文本缓存设置。
-  历史 fast 配置仍固定为双侧拼接、m/ρ 关闭版。
+训练期验证沿用 pilot 的 development.csv；训练数据池没有改成该子集。正式测试 `TEST.DATA_CSV: ""`，即数据集原始测试池，10,000 episodes；预设末轮为 epoch 10。历史 pilot 的 reserved 测试入口只保留在独立配置中。
 
-内部 `TEXT_CONCAT_ST.ENABLE`、shared 和 loss 标志由四个公开开关统一生成，不在 sav 中重复配置。
-当前为无解耦、含运动模块的原始匹配 baseline；不代表复现历史整套训练协议。详见消融说明。
+维护中的 SAV 配置：
 
-每个进程每步处理一个 episode；有效全局 episode 数为进程数乘以梯度累积步数。通用 `TRAIN/TEST.BATCH_SIZE` 不控制这里的 episode 大小。
+- `sav.yaml`：完整模型，输出 `output/sav/rho_change`。
+- `sav_rho_only.yaml`：同协议 ρ-only 基线。
+- `sav_decoupled_base.yaml`：同协议双侧解耦、不使用 ρ 或变化证据。
+- `sav_entity_change_s1.yaml`：原 pilot 协议，含 development/reserved 划分，仅用于复现。
 
-SAV YAML 已移除旧评分阈值、Top-K 校准、旧模型选择项、关闭的时序细化、未使用的 AUG 配置，以及数据加载器不读取的通用视频预处理选项。RandAugment 由 `DATA.USE_RAND_AUGMENT` 独立控制，仍然开启。
+保持最新完整模型和原 ρ-only 的参数名、架构签名不变。旧 m/竞争/反馈模型不再受当前代码支持，需使用清理前备份或对应 run 的 source 快照。不能把新旧结构的权重静默混载。
 
-共享配置保留其他数据集所需的 DINO、CLIP 等入口。关闭的时序相似度细化、文本对齐、相关性生成轨迹、HoD 时序金字塔、MixUp/CutMix 和额外编码器占位分支已从代码中移除。
-
-## 运行与检查点
+## 运行
 
 ```bash
-/home/duanwei/miniconda3/envs/trokens/bin/python tools/run_local.py \
-  --cfg configs/trokens/sav.yaml --gpus 0,1 \
-  --output-dir output/sav_no_decoupling_hod_ctd_1shot
+python tools/run_local.py --cfg configs/trokens/sav.yaml --gpus 0,1
 ```
 
-实际 GPU 数由启动参数决定，训练前按实验协议设置 `GRAD_ACCUM_STEPS`。
-
-真正续训/评估必须加载同结构完整参数，角色/判断开关及架构签名需要一致。
-本组配置默认从头训练，不自动恢复旧 checkpoint；新实验请使用未占用的独立输出目录。
-当前不应把文本解耦、m/ρ 开启或关闭运动模块的模型权重直接当作同结构续训。
-
-## TinyVIRAT 配置
-
-入口为 `configs/trokens/tinyvirat.yaml`，默认输出仍为 `output/tinyvirat`。
-Tiny 已对齐 SAV 的 5-way 1-shot、双侧文本解耦及 m/ρ 关闭、HoD/CTD 开启设置。
-每轮 2000 个训练 episode、10000 个测试 episode、20 轮及学习率策略不变。
-
-保留 TinyVIRAT 的数据/轨迹路径、21 类及顺序、12/9 类划分和 105 条独立文本描述。
-空间读出使用 `QUERY_MASK_MODE: all`，测试仍为 `DROP_EMPTY_QUERY_ROWS: True`，SAV 仍为 False。
-旧前置路由/Support 文本融合配置已被统一开关替代；RandAugment 仍由 `DATA.USE_RAND_AUGMENT` 控制。
+当前修改不自动启动训练或测试；多 seed 暂缓。旧结果和 checkpoint 未删除。详见 [清理记录](rho_cleanup_20261106.md)。

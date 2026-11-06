@@ -16,7 +16,8 @@ from trokens.models.query_matching import normalize_patch_region_weights
 
 
 class TextConcatST(nn.Module):
-    def __init__(self, cfg, global_classifier=True, quality=False, uniqueness=False):
+    def __init__(self, cfg, global_classifier=True, uniqueness=False,
+                 entity_change=None):
         super().__init__()
         self.temporal_text_tokens = int(cfg.TEMPORAL_TEXT_TOKENS)
         self.spatial_text_tokens = int(cfg.SPATIAL_TEXT_TOKENS)
@@ -27,8 +28,8 @@ class TextConcatST(nn.Module):
         self.readout_checkpoint = bool(getattr(cfg, 'READOUT_CHECKPOINT', False))
         self.shared_query = bool(getattr(cfg, 'SHARED_QUERY_ENABLE', False))
         self.shared_support = bool(getattr(cfg, 'SHARED_SUPPORT_ENABLE', False))
-        if self.shared_query and (quality or uniqueness):
-            raise ValueError('Shared Query requires both quality and uniqueness OFF.')
+        if self.shared_query and uniqueness:
+            raise ValueError('Shared Query requires rho OFF.')
         if self.activation_checkpoint and (self.mlp_checkpoint or self.readout_checkpoint):
             raise ValueError('Use either full TEXT_CONCAT_ST checkpoint or selective MLP/readout checkpoints.')
         self.global_classifier = bool(global_classifier)
@@ -39,9 +40,9 @@ class TextConcatST(nn.Module):
             raise ValueError('TEXT_CONCAT_ST requires spatial_text_attention readout.')
         # No learned prompt, gate, extra QKV or readout projection.
         signature = [1, self.temporal_text_tokens, self.spatial_text_tokens, int(global_classifier)]
-        if quality or uniqueness:
-            # v2 verifies Raw m / same-spatial-readout Post rho. v1 remains intact.
-            signature = [2, *signature[1:], int(quality), int(uniqueness)]
+        if uniqueness:
+            # v2 rho signature keeps the retired-m slot at zero for checkpoint compatibility.
+            signature = [2, *signature[1:], 0, int(uniqueness)]
         if self.shared_query:
             # v3 has different Query semantics, even though parameter shapes match.
             signature = [3, *signature[1:]]
@@ -52,7 +53,12 @@ class TextConcatST(nn.Module):
         elif self.shared_support:
             # Query-only text conditioning: generic Support, class-wise Query.
             signature = [6, self.temporal_text_tokens, self.spatial_text_tokens,
-                         int(global_classifier), int(quality), int(uniqueness)]
+                         int(global_classifier), 0, int(uniqueness)]
+        if entity_change is not None and entity_change.ENABLE:
+            if (self.shared_query or self.shared_support or not uniqueness):
+                raise ValueError('ENTITY_CHANGE requires dual decoupling and rho.')
+            from trokens.config.entity_change import entity_change_signature
+            signature = signature + entity_change_signature(entity_change)
         self.register_buffer('architecture_signature', torch.tensor(signature, dtype=torch.int64))
 
 
@@ -189,16 +195,13 @@ def _shared_support_evidence(model, valid, patches):
 
 
 def _shared_support_encodings(model, features, raw, mask, evidence_mask, text, si, qi, labels, known):
-    """Encode Support once, then class-conditioned Query; optional independent m/rho.
+    """Encode Support once, then class-conditioned Query; optional rho.
 
     Only compact Support frame references acquire a class axis. Never copy or
     encode Support patch tensors per class, including when rho is enabled.
     """
     config, verifier = model.text_concat_st, model.query_evidence_verifier
-    quality = verifier is not None and verifier.quality
     uniqueness = verifier is not None and verifier.uniqueness
-    if quality and (raw is None or raw.shape != features.shape):
-        raise ValueError('Text-concat quality requires aligned pre-encoder Raw DinoTxt tokens.')
 
     def run(function, *args):
         return (checkpoint(function, *args, use_reentrant=False)
@@ -220,8 +223,7 @@ def _shared_support_encodings(model, features, raw, mask, evidence_mask, text, s
     for start in range(0, text.shape[0], config.class_chunk_size):
         class_text = text[start:start + config.class_chunk_size]
         signs, available = labels[:, start:start + class_text.shape[0]], known[:, start:start + class_text.shape[0]]
-        outputs = (verifier.compute_raw_quality(raw[qi], raw[si], class_text,
-                   evidence_mask[qi], support_valid, signs, available) if quality else {})
+        outputs = {}
         refs = references[:, None].expand(-1, class_text.shape[0], -1, -1) if uniqueness else None
         valid = valid_frames[:, None].expand(-1, class_text.shape[0], -1) if uniqueness else None
         parts = [run(partial(_encode_chunk, model,
@@ -246,6 +248,7 @@ def _shared_support_encodings(model, features, raw, mask, evidence_mask, text, s
 
 def _support_evidence(model, valid, patches, weights):
     verifier = model.query_evidence_verifier
+    # Do not detach the separately returned MAIN Support frames/prototypes.
     pi = normalize_patch_region_weights(verifier._input(weights), valid)
     with torch.autocast(device_type=patches.device.type, enabled=False):
         return torch.einsum('bktn,bktnd->bktd', pi, verifier._input(patches).float())
@@ -256,27 +259,33 @@ def _query_evidence(model, text, valid, support_valid, references, reference_val
     verifier = model.query_evidence_verifier
     pi = normalize_patch_region_weights(weights, valid)
     # Each singleton call compares only the SAME candidate-class encodings.
-    # Raw quality is computed once per class group, not per Query/video chunk.
     return _merge_outputs([
-        verifier(raw_query=None, raw_support=None, text=text[k:k+1],
+        verifier(text=text[k:k+1],
                  post_query=patches[:, k], post_references=references[:, k:k+1],
                  query_weights=pi[:, k:k+1], query_valid=valid,
-                 support_raw_valid=support_valid, support_frame_valid=reference_valid[:, k:k+1],
-                 support_labels=labels[:, k:k+1], support_known=known[:, k:k+1],
-                 quality_output={})
+                 support_frame_valid=reference_valid[:, k:k+1],
+                 support_labels=labels[:, k:k+1], support_known=known[:, k:k+1])
         for k in range(text.shape[0])
     ], class_axis=True)
 
 
-def _verified_encodings(model, features, raw, mask, evidence_mask, text, si, qi, labels, known):
+def _verified_encodings(model, features, raw, mask, evidence_mask, text, si, qi, labels, known,
+                        entity_metadata=None):
     """Support-first streaming, one encoder pass per video/class (also negatives).
 
     Only per-Support frame references survive across Query chunks. Main visual
     pooling/masks are unchanged; visibility masks apply exclusively to evidence.
     """
     config, verifier = model.text_concat_st, model.query_evidence_verifier
-    if verifier.quality and (raw is None or raw.shape != features.shape):
-        raise ValueError('Text-concat quality requires aligned pre-encoder Raw DinoTxt tokens.')
+    change = getattr(model, 'entity_change_verifier', None)
+    if change is not None:
+        from .entity_change_verifier import _join
+        required = ['entity_index', 'entity_distinct', 'point_indices']
+        if change.cfg.GEO_ENABLE:
+            required += ['entity_geo', 'entity_geo_valid']
+        if entity_metadata is None or any(key not in entity_metadata for key in required):
+            raise ValueError('ENTITY_CHANGE requires aligned dataset entity metadata.')
+        entity_metadata = {key: entity_metadata[key].to(features.device) for key in required}
     support_valid, query_valid = evidence_mask[si], evidence_mask[qi]
     order = torch.cat((si, qi)).argsort()
     all_frames, all_weights, all_outputs = [], [], []
@@ -289,17 +298,24 @@ def _verified_encodings(model, features, raw, mask, evidence_mask, text, si, qi,
                 if config.activation_checkpoint and model.training and torch.is_grad_enabled()
                 else function(*args))
 
+    def with_change(reader, indices, patches, weights):
+        return dict(rho=reader(patches, weights), change=change.readout(
+            patches, weights, evidence_mask[indices], entity_metadata['entity_index'][indices],
+            entity_metadata['entity_distinct'][indices], entity_metadata['point_indices'][indices]))
+
     for start in range(0, text.shape[0], config.class_chunk_size):
         classes = slice(start, start + config.class_chunk_size)
         class_text, signs, available = text[classes], labels[:, classes], known[:, classes]
-        quality = (verifier.compute_raw_quality(raw[qi], raw[si], class_text,
-                   query_valid, support_valid, signs, available) if verifier.quality else {})
-        support_parts = [encode(ix, class_text, partial(_support_evidence, model, evidence_mask[ix])
-                                if verifier.uniqueness else None)
-                         for ix in si.split(config.video_chunk_size)]
+        support_parts = []
+        for ix in si.split(config.video_chunk_size):
+            reader = partial(_support_evidence, model, evidence_mask[ix]) if verifier.uniqueness else None
+            if change is not None:
+                reader = partial(with_change, reader, ix)
+            support_parts.append(encode(ix, class_text, reader))
         support_frames, support_weights, support_globals = (
             torch.cat([p[i] for p in support_parts], 0) for i in range(3))
-        references = (torch.cat([p[3] for p in support_parts], 0) if verifier.uniqueness else None)
+        references = (torch.cat([p[3]['rho'] if change is not None else p[3]
+                                for p in support_parts], 0) if verifier.uniqueness else None)
         reference_valid = (support_valid.any(-1)[:, None] & references.float().norm(dim=-1).gt(1e-12)
                            if references is not None else None)
         query_parts = []
@@ -307,11 +323,21 @@ def _verified_encodings(model, features, raw, mask, evidence_mask, text, si, qi,
             reader = (partial(_query_evidence, model, class_text, evidence_mask[ix], support_valid,
                               references, reference_valid, signs, available)
                       if verifier.uniqueness else None)
+            if change is not None:
+                reader = partial(with_change, reader, ix)
             query_parts.append(encode(ix, class_text, reader))
         query_frames, query_weights, query_globals = (
             torch.cat([p[i] for p in query_parts], 0) for i in range(3))
-        outputs = _merge_outputs([p[3] for p in query_parts]) if verifier.uniqueness else {}
-        outputs.update(quality)
+        outputs = _merge_outputs([p[3]['rho'] if change is not None else p[3]
+                                  for p in query_parts]) if verifier.uniqueness else {}
+        if change is not None:
+            sc, qc = _join([p[3]['change'] for p in support_parts]), _join([p[3]['change'] for p in query_parts])
+            geo, gv = entity_metadata.get('entity_geo'), entity_metadata.get('entity_geo_valid')
+            outputs.update(change.evidence(qc, sc,
+                geo[qi] if geo is not None else None, geo[si] if geo is not None else None,
+                gv[qi] if gv is not None else None, gv[si] if gv is not None else None,
+                signs, available, rho=verifier))
+            outputs['entity_alpha'] = qc['alpha']
         all_outputs.append(outputs)
         all_frames.append(torch.cat((support_frames, query_frames), 0)[order])
         all_weights.append(torch.cat((support_weights, query_weights), 0)[order])
@@ -359,8 +385,13 @@ def text_concat_episode(model, features, metadata, raw=None):
             model, features, mask, text, si, qi)
     elif verifier is not None:
         evidence_mask = mask & metadata.get('pred_visibility', mask).to(device).bool()
-        frames, weights, global_sum, outputs = _verified_encodings(
-            model, features, raw, mask, evidence_mask, text, si, qi, labels, known)
+        if getattr(model, 'entity_change_verifier', None) is not None:
+            frames, weights, global_sum, outputs = _verified_encodings(
+                model, features, raw, mask, evidence_mask, text, si, qi, labels, known,
+                entity_metadata=metadata)
+        else:
+            frames, weights, global_sum, outputs = _verified_encodings(
+                model, features, raw, mask, evidence_mask, text, si, qi, labels, known)
     else:
         # Keep the v1 execution path intact, including its video/RNG ordering.
         all_frames, all_weights = [], []
@@ -430,6 +461,9 @@ def text_concat_episode(model, features, metadata, raw=None):
         result = finish_query_evidence_aux(
             model, result, query_prototypes, support_prototypes, query_weights, query_valid,
             normalize_patch_region_weights(query_weights, query_valid), outputs)
+        change = getattr(model, 'entity_change_verifier', None)
+        if change is not None:
+            result = change.fuse(result, {k: v for k, v in outputs.items() if k.startswith('entity_')})
     if config.global_classifier:
         result['global_classification_logits'] = model.head(
             model.head_drop(model.pre_logits(global_features)))

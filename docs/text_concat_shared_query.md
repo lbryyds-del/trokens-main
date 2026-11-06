@@ -1,5 +1,7 @@
 # Support 文本拼接 + 通用共享 Query（m/ρ 全关闭）
 
+> 历史记录，非当前运行说明。2026-11-06 已删除废弃实验代码和旧配置；当前入口及恢复方法见 [ρ 收敛记录](rho_cleanup_20261106.md)。本文原始实验叙述保留，不代表当前模型。
+
 本页为 v3 对照：`configs/trokens/sav_text_concat_shared_query.yaml`。
 当前默认 `sav.yaml` 已改为[双侧关闭文本解耦](shared_support_query.md)，不再与本页配置相同。
 输出：`output/sav_text_concat_shared_query_m_rho_off`。

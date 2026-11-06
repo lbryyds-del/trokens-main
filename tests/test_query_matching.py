@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from trokens.models.query_matching import (
-    classwise_frame_similarity, factorize_frame_hypothesis_states,
+    classwise_frame_similarity, rho_frame_hypothesis_states,
     hypothesis_mass_bimhm_logits, normalize_patch_region_weights,
 )
 
@@ -24,42 +24,20 @@ def test_query_region_weights_respect_visibility_and_renormalize():
     assert torch.allclose(normalized.sum(dim=-1), torch.ones(1, 2, 1))
 
 
-def test_frame_hypothesis_states_factorize_mass_and_specificity():
-    result = factorize_frame_hypothesis_states(
-        torch.tensor([[[0.8, 1.0, 0.2]]]),
-        torch.tensor([[[0.6, 0.25, 1.0]]]),
-    )
-
-    assert result["target_mass"].flatten().tolist() == pytest.approx(
-        [0.48, 0.25, 0.20]
-    )
-    assert result["confuser_mass"].flatten().tolist() == pytest.approx(
-        [0.32, 0.75, 0.00]
-    )
-    assert result["null_mass"].flatten().tolist() == pytest.approx(
-        [0.20, 0.00, 0.80]
-    )
-    total = (
-        result["target_mass"]
-        + result["confuser_mass"]
-        + result["null_mass"]
-    )
-    assert torch.allclose(total, torch.ones_like(total))
+def test_rho_states_have_no_retired_m_factor():
+    value = torch.tensor([[[0.6, 0.25, 1.0]]], requires_grad=True)
+    states = rho_frame_hypothesis_states(value)
+    torch.testing.assert_close(states["target_mass"], value, rtol=0, atol=0)
+    torch.testing.assert_close(states["confuser_mass"], 1 - value, rtol=0, atol=0)
+    assert not states["null_mass"].any()
+    states["target_mass"].sum().backward()
+    assert torch.equal(value.grad, torch.ones_like(value))
 
 
-def test_frame_hypothesis_states_reduce_to_each_single_factor():
-    value = torch.tensor([[[0.2, 0.7]]])
-    quality_only = factorize_frame_hypothesis_states(
-        value,
-        torch.ones_like(value),
-    )
-    specificity_only = factorize_frame_hypothesis_states(
-        torch.ones_like(value),
-        value,
-    )
-
-    assert torch.equal(quality_only["target_mass"], value)
-    assert torch.equal(specificity_only["target_mass"], value)
+def test_rho_states_sanitize_nonfinite_values():
+    states = rho_frame_hypothesis_states(torch.tensor([float("nan"), float("inf"), -float("inf"), -.1, 2.]))
+    assert states["target_mass"].tolist() == [1., 1., 0., 0., 1.]
+    assert torch.equal(sum(states.values()), torch.ones(5))
 
 
 def test_zero_transport_strength_exactly_recovers_base_logits():

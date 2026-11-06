@@ -1,5 +1,7 @@
 # SAV 第 1 版：双轴单文本拼接，关闭 m / ρ
 
+> 历史记录，非当前运行说明。2026-11-06 已删除废弃实验代码和旧配置；当前入口及恢复方法见 [ρ 收敛记录](rho_cleanup_20261106.md)。本文原始实验叙述保留，不代表当前模型。
+
 本文以下为 v1 历史记录。2026-10-24 起，v1 对照入口固定为
 `configs/trokens/sav_text_concat_s1_base.yaml`（有效配置与切换前的 sav 完全相同），
 原 fast/S32 配置仍关闭 m/ρ。[v2：Raw m / 同空间权重 Post ρ](text_concat_verifier.md)
